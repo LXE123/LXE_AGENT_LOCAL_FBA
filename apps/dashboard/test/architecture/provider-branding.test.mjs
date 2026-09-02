@@ -98,3 +98,26 @@ test("Kimi and DeepSeek use distinct responsive card themes", () => {
   assert.doesNotMatch(providerMark, /provider-brand-(?:orbit|scan|pulse)/);
   assert.match(styles, /@container model-card \(max-width:\s*340px\)/);
 });
+
+test("Zhipu cards carry the Z.ai brand treatment", () => {
+  // Both Zhipu surfaces share one blue-tinted palette keyed off the official
+  // #1F63EC, the way DeepSeek's card is keyed off its own blue.
+  assert.match(styles, /\.model-card\[data-provider="zhipuai"\][\s\S]*?--model-card-bg:\s*#f3f6ff/);
+  assert.match(styles, /\.model-card\[data-provider="zhipuai"\][\s\S]*?--model-badge-bg:\s*#1f63ec/);
+  assert.match(
+    styles,
+    /\.model-card\[data-provider="zhipuai"\],\s*\.model-card\[data-provider="zhipuai_coding_plan"\] \{/,
+  );
+  assert.match(styles, /\.model-card\[data-provider="zhipuai"\]::after[\s\S]*?radial-gradient/);
+  assert.match(
+    styles,
+    /:root\[data-theme="dark"\] \.model-card\[data-provider="zhipuai"\][\s\S]*?--model-card-bg:\s*#1a1f33/,
+  );
+  assert.match(styles, /\.provider-brand-mark\[data-provider-mark="zhipu"\] \{[^}]*color:\s*#1f63ec/s);
+  assert.match(styles, /:root\[data-theme="dark"\] \.provider-brand-mark\[data-provider-mark="zhipu"\] \{[^}]*color:\s*#8aa9f5/s);
+  // The glyph comes from the official logo file, merged into one currentColor
+  // path; no raster or remote asset is involved.
+  assert.match(providerMark, /kind === "zhipu"/);
+  assert.match(providerMark, /kind === "zhipu" \? \([\s\S]*?<svg fill="currentColor"[\s\S]*?viewBox="0 0 30 30"/);
+  assert.match(providerMark, /zhipuai_coding_plan/);
+});

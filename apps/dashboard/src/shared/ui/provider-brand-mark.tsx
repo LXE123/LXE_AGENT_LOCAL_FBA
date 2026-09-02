@@ -2,13 +2,14 @@ import { Brain } from "lucide-react";
 
 import kimiIconRound from "../../assets/providers/kimi/kimi-icon-round.png";
 
-export type ProviderBrandKind = "kimi" | "deepseek" | "openrouter" | "generic";
+export type ProviderBrandKind = "kimi" | "deepseek" | "openrouter" | "zhipu" | "generic";
 
 export function providerBrandKind(provider: string | null | undefined): ProviderBrandKind {
   const normalized = String(provider || "").trim().toLowerCase().replaceAll("-", "_");
   if (["kimi", "kimi_coding", "kimi_code"].includes(normalized)) return "kimi";
   if (["deepseek", "deep_seek"].includes(normalized)) return "deepseek";
   if (["openrouter", "open_router"].includes(normalized)) return "openrouter";
+  if (["zhipu", "zhipuai", "zhipuai_coding_plan", "z_ai"].includes(normalized)) return "zhipu";
   return "generic";
 }
 
@@ -47,6 +48,15 @@ export function ProviderBrandMark({
         // and brand terms. The path data is unmodified.
         <svg fill="currentColor" focusable="false" viewBox="0 0 401.4 293.7">
           <path d="M303.9475,17.19926c42.79734,0,77.48933,34.69327,77.48933,77.48933s-34.69199,77.48933-77.48933,77.48933l76.86166,76.86244c9.76367,9.76313,2.84903,26.45667-10.95697,26.45667h-220.88335c-71.32686,0-129.14889-57.82202-129.14889-129.14889S77.64197,17.19926,148.96884,17.19926h154.97866ZM148.96884,68.85881c-42.79607,0-77.48933,34.69327-77.48933,77.48933s34.69327,77.48933,77.48933,77.48933,77.48933-34.69327,77.48933-77.48933-34.69327-77.48933-77.48933-77.48933Z" />
+        </svg>
+      ) : kind === "zhipu" ? (
+        // Official Z.ai "Z" glyph: the three filled shapes from
+        // z-cdn.chatglm.cn/z-ai/static/logo.svg (the exact file the z.ai
+        // homepage serves) merged into one filled path and recolored through
+        // currentColor. Retrieved 2026-09-03; see
+        // assets/providers/zhipu/SOURCE.md for provenance and brand terms.
+        <svg fill="currentColor" focusable="false" viewBox="0 0 30 30">
+          <path d="M15.47,7.1l-1.3,1.85c-0.2,0.29-0.54,0.47-0.9,0.47h-7.1V7.09C6.16,7.1,15.47,7.1,15.47,7.1z M24.3,7.1 L13.14,22.91 H5.7 L16.86,7.1 Z M14.53,22.91l1.31-1.86c0.2-0.29,0.54-0.47,0.9-0.47h7.09v2.33H14.53z" />
         </svg>
       ) : (
         <Brain focusable="false" size={size} strokeWidth={1.8} />

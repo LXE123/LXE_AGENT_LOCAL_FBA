@@ -14,6 +14,9 @@ describe("ProviderBrandMark", () => {
     expect(providerBrandKind("deep-seek")).toBe("deepseek");
     expect(providerBrandKind("openrouter")).toBe("openrouter");
     expect(providerBrandKind("open-router")).toBe("openrouter");
+    expect(providerBrandKind("zhipuai")).toBe("zhipu");
+    expect(providerBrandKind("zhipuai-coding-plan")).toBe("zhipu");
+    expect(providerBrandKind("z-ai")).toBe("zhipu");
     expect(providerBrandKind("unknown_provider")).toBe("generic");
     expect(providerBrandKind("unknown-provider")).toBe("generic");
   });
@@ -22,6 +25,7 @@ describe("ProviderBrandMark", () => {
     const kimi = renderToStaticMarkup(<ProviderBrandMark provider="kimi_coding" />);
     const deepseek = renderToStaticMarkup(<ProviderBrandMark provider="deepseek" />);
     const openrouter = renderToStaticMarkup(<ProviderBrandMark provider="openrouter" />);
+    const zhipu = renderToStaticMarkup(<ProviderBrandMark provider="zhipuai" />);
     const fallback = renderToStaticMarkup(<ProviderBrandMark provider="unknown_provider" />);
 
     expect(kimi).toContain('data-provider-mark="kimi"');
@@ -33,9 +37,11 @@ describe("ProviderBrandMark", () => {
     expect(deepseek).toContain('data-provider-mark="deepseek"');
     expect(openrouter).toContain('data-provider-mark="openrouter"');
     expect(openrouter).toContain('viewBox="0 0 401.4 293.7"');
+    expect(zhipu).toContain('data-provider-mark="zhipu"');
+    expect(zhipu).toContain('viewBox="0 0 30 30"');
     expect(fallback).toContain('data-provider-mark="generic"');
     expect(fallback).toContain("lucide-brain");
-    expect(`${kimi}${deepseek}${openrouter}`).not.toMatch(/https?:\/\//u);
+    expect(`${kimi}${deepseek}${openrouter}${zhipu}`).not.toMatch(/https?:\/\//u);
   });
 
   test("keeps the Kimi icon scalable at compact status sizes", () => {

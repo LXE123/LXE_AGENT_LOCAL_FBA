@@ -259,6 +259,23 @@ button {
   border-color: #43335f;
 }
 
+:root[data-theme="dark"] .model-card[data-provider="zhipuai"],
+:root[data-theme="dark"] .model-card[data-provider="zhipuai_coding_plan"] {
+  --model-soft: #1d2440;
+  --model-ring: #33417a;
+  --model-card-bg: #1a1f33;
+  --model-card-active-bg: #1e2440;
+  --model-card-text: #cfdcfb;
+  --model-card-muted: #8fa3cc;
+  --model-card-soft-text: #adbfe6;
+  --model-panel-bg: rgba(255, 255, 255, 0.04);
+  --model-panel-border: #2f3a63;
+  --model-input-bg: rgba(0, 0, 0, 0.32);
+  --model-input-disabled-bg: #232a45;
+  --model-input-text: #cfdcfb;
+  border-color: #2f3a63;
+}
+
 :root[data-theme="dark"] .skills-catalog {
   --catalog-hue: #a892c4;
   --catalog-hue-strong: #c3b0da;
@@ -3425,6 +3442,30 @@ h1 {
   box-shadow: 0 18px 40px rgba(45, 76, 138, 0.12);
 }
 
+.model-card[data-provider="zhipuai"],
+.model-card[data-provider="zhipuai_coding_plan"] {
+  --model-hue: #1f63ec;
+  --model-hue-strong: #143f9e;
+  --model-soft: #e7eeff;
+  --model-ring: #bccbf8;
+  --model-card-bg: #f3f6ff;
+  --model-card-active-bg: #eef3ff;
+  --model-card-text: #16386f;
+  --model-card-muted: #5a6f96;
+  --model-card-soft-text: #405a8c;
+  --model-panel-bg: rgba(255, 255, 255, 0.62);
+  --model-panel-border: #d5def5;
+  --model-input-bg: rgba(255, 255, 255, 0.82);
+  --model-input-disabled-bg: #e8eef9;
+  --model-input-text: #16386f;
+  --model-focus-ring: rgba(31, 99, 236, 0.2);
+  --model-badge-bg: #1f63ec;
+  --model-badge-color: #ffffff;
+  --model-badge-border: #1f63ec;
+  border-color: #d3dcf3;
+  box-shadow: 0 18px 40px rgba(23, 56, 111, 0.12);
+}
+
 .model-card[data-provider="openrouter"] {
   --model-hue: #7624f4;
   --model-hue-strong: #5a14cf;
@@ -3499,6 +3540,11 @@ h1 {
 
 .model-card[data-provider="openrouter"]::after {
   background: radial-gradient(circle at 88% 4%, rgba(118, 36, 244, 0.16), transparent 33%);
+}
+
+.model-card[data-provider="zhipuai"]::after,
+.model-card[data-provider="zhipuai_coding_plan"]::after {
+  background: radial-gradient(circle at 88% 4%, rgba(31, 99, 236, 0.16), transparent 33%);
 }
 
 .model-card > :not(.model-brand-watermark, .model-kimi-dust, .model-deepseek-waves) {
@@ -3697,6 +3743,15 @@ h1 {
 
 :root[data-theme="dark"] .provider-brand-mark[data-provider-mark="openrouter"] {
   color: #c8ff00;
+}
+
+/* The Zhipu mark is a currentColor SVG carrying the official Z.ai blue. */
+.provider-brand-mark[data-provider-mark="zhipu"] {
+  color: #1f63ec;
+}
+
+:root[data-theme="dark"] .provider-brand-mark[data-provider-mark="zhipu"] {
+  color: #8aa9f5;
 }
 
 .model-card[data-provider="kimi_coding"] .item-icon {
