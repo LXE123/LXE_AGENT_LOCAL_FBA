@@ -8570,25 +8570,25 @@ pre {
   position: fixed;
   z-index: 180;
   display: grid;
-  gap: 1.3px;
-  padding: 4px;
+  gap: 1.6px;
+  padding: 4.8px;
   border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 8px;
+  border-radius: 9.6px;
   background: #3b3936;
   color: #f2ede6;
   box-shadow: 0 18px 42px rgba(0, 0, 0, 0.34);
-  font-size: 0.66rem;
+  font-size: 0.79rem;
 }
 
 .session-actions-menu button {
   display: grid;
-  min-height: 22.5px;
-  grid-template-columns: 12px minmax(0, 1fr);
+  min-height: 27px;
+  grid-template-columns: 14.4px minmax(0, 1fr);
   align-items: center;
-  gap: 5.3px;
-  padding: 4px 6px;
+  gap: 6.4px;
+  padding: 4.8px 7.2px;
   border: 0;
-  border-radius: 5.3px;
+  border-radius: 6.4px;
   background: transparent;
   color: inherit;
   cursor: pointer;
@@ -8612,9 +8612,9 @@ pre {
 
 .session-actions-hint,
 .session-actions-error {
-  margin: 2.6px 5.3px 2px;
+  margin: 3.1px 6.4px 2.4px;
   color: #c7bdb2;
-  font-size: 0.45rem;
+  font-size: 0.54rem;
   line-height: 1.4;
 }
 

@@ -2352,8 +2352,8 @@ function SessionActionsMenu({
   const t = useUiText();
   const menuRef = useRef<HTMLDivElement>(null);
   const rect = anchor.getBoundingClientRect();
-  const width = 125;
-  const estimatedHeight = error ? 94 : 68;
+  const width = 150;
+  const estimatedHeight = error ? 113 : 82;
   const left = Math.max(8, Math.min(window.innerWidth - width - 8, rect.right - width));
   const top = rect.bottom + 5 + estimatedHeight <= window.innerHeight
     ? rect.bottom + 5
@@ -2404,7 +2404,7 @@ function SessionActionsMenu({
       style={{ left, top, width }}
     >
       <button disabled={pending} onClick={onPin} role="menuitem" type="button">
-        {session.pinned_at > 0 ? <PinOff size={10} /> : <Pin size={10} />}
+        {session.pinned_at > 0 ? <PinOff size={12} /> : <Pin size={12} />}
         <span>{session.pinned_at > 0 ? t.sessions.unpin : t.sessions.pin}</span>
       </button>
       <button
@@ -2415,7 +2415,7 @@ function SessionActionsMenu({
         title={deletingBlocked ? t.sessions.deleteRunning : undefined}
         type="button"
       >
-        <Trash2 size={10} />
+        <Trash2 size={12} />
         <span>{t.sessions.delete}</span>
       </button>
       {deletingBlocked ? <p className="session-actions-hint">{t.sessions.deleteRunning}</p> : null}
