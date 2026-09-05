@@ -51,22 +51,25 @@ for (const [name, table] of Object.entries(tables)) {
     if (table.formulas === 'sales') {
       s.getRange(`F5:G${last}`).formulas = table.rows.map((_,i) => {
         const r=i+5;
-        return [`=IF(OR(D${r}="",E${r}=""),"",E${r}-D${r})`,`=IF(OR(D${r}="",E${r}="",D${r}=0),"",F${r}/D${r})`];
+        return [`=IF(COUNT(D${r}:E${r})=2,E${r}-D${r},"")`,`=IF(AND(COUNT(D${r}:E${r})=2,D${r}<>0),F${r}/D${r},"")`];
       });
       s.getRange(`G5:G${last}`).setNumberFormat('0.0%');
     } else if (table.formulas === 'inventory') {
       // K=available L=transfer M=processing N=customer ... T=inTransit.
       s.getRange(`W5:X${last}`).formulas = table.rows.map((_,i) => {
         const r=i+5;
-        return [`=IF(OR(F${r}="",M${r}="",N${r}=""),"",F${r}-M${r}-N${r})`,`=IF(OR(T${r}="",O${r}="",P${r}="",Q${r}=""),"",T${r}-O${r}-P${r}-Q${r})`];
+        return [`=IF(COUNT(F${r},M${r},N${r})=3,F${r}-M${r}-N${r},"")`,`=IF(COUNT(T${r},O${r},P${r},Q${r})=4,T${r}-O${r}-P${r}-Q${r},"")`];
       });
     } else if (table.formulas === 'replay') {
       s.getRange(`F5:F${last}`).formulas = table.rows.map((_,i) => {
-        const r=i+5;return [`=IF(OR(D${r}="",E${r}=""),"",E${r}-D${r})`];
+        const r=i+5;return [`=IF(COUNT(D${r}:E${r})=2,E${r}-D${r},"")`];
       });
       s.getRange(`O5:P${last}`).format.columnWidth=70;
       s.getRange(`O5:P${last}`).format.wrapText=true;
       s.getRange(`A5:P${last}`).format.rowHeight=110;
+      s.getRange(`C5:C${last}`).format.wrapText=true;
+      s.getRange(`N5:N${last}`).format.wrapText=true;
+      s.getRange(`N1:N${last}`).format.columnWidth=35;
     }
     const lastText = s.getRange(`${end}5:${end}${last}`);
     lastText.format.columnWidth = name === '概览' ? 90 : /说明|原因|结果/.test(table.headers.at(-1)) ? 56 : 19;
@@ -78,6 +81,15 @@ for (const [name, table] of Object.entries(tables)) {
       s.getRange(`E1:F${last}`).format.columnWidth=26;
     }
     if (name === '库存口径核对') s.getRange(`A1:A${last}`).format.columnWidth=55;
+    if (name === '本地绑定') s.getRange(`C1:D${last}`).format.columnWidth=38;
+    if (table.formulas === 'sales' || table.formulas === 'replay') {
+      const computed=s.getRange(`F5:F${last}`).values.flat();
+      for (let i=0;i<table.rows.length;i++) {
+        const row=table.rows[i];
+        const expected=row[3]===null || row[4]===null ? '' : row[4]-row[3];
+        if ((computed[i] ?? '') !== expected) throw new Error(`${name} F${i+5}: expected ${expected}, got ${computed[i]}`);
+      }
+    }
   }
   console.log(name, 'rows', table.rows.length);
   const preview = await wb.render({sheetName:name,range:`A1:${col(Math.min(table.headers.length,8)-1)}${Math.min(last,name==='补货对照AB'?8:12)}`,scale:1.5,format:'png'});

@@ -249,6 +249,7 @@ def main():
     parser.add_argument('--resume-fixed', action='store_true', help='Resume only missing fixed Mabang stages using existing captured inputs')
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=args.resume_fixed)
+    (args.output / '.gitignore').write_text('*\n')
     load_env(args.env_file)
     client = Client(args.output)
     if args.resume_fixed:
