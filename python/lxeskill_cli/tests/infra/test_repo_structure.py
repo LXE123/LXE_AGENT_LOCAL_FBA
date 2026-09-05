@@ -50,6 +50,7 @@ ALLOWED_GATEWAY_TEST_DIRECTORIES = {
 }
 ALLOWED_RUNTIME_SOURCE_DIRECTORIES = {
     "engine",
+    "messages",
     "operations",
     "providers",
     "state",
