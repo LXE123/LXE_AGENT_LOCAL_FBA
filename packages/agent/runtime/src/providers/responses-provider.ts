@@ -1,3 +1,5 @@
+import { canReplayMetadata, completeTool, replaySignature } from "../messages/replay";
+import { AssistantMessageAccumulator } from "../messages/accumulator";
 import OpenAI from "openai";
 import type { JsonObject } from "@lxe/protocol";
 import type {
@@ -6,11 +8,9 @@ import type {
   RuntimeMessageContent,
   RuntimeProvider,
   RuntimeProviderRequest,
-  RuntimeStreamEvent,
   RuntimeSummaryRequest,
   RuntimeSummaryResult,
-  RuntimeTurnResponse,
-  RuntimeUsage,
+  AssistantMessage,
   ToolSchema,
 } from "../engine/types";
 import { compactionSummaryProviderText } from "../engine/compaction-summary";
@@ -26,7 +26,6 @@ import {
   type ProviderDescriptor,
 } from "./provider";
 import { OpenAIResponsesStreamAdapter } from "./protocols/openai-responses";
-export { OpenAIResponsesStreamAdapter as ResponsesStreamNormalizer } from "./protocols/openai-responses";
 
 const IMAGE_PLACEHOLDER = "[image omitted: the selected model does not support image content]";
 
@@ -96,7 +95,7 @@ const toolResultOutput = (content: unknown, supportsVision: boolean): string | J
  * items rather than as content blocks inside a message, so one RuntimeMessage
  * can expand into several input items.
  */
-export function adaptMessagesForResponses(messages: RuntimeMessage[], supportsVision = false): JsonObject[] {
+export function adaptMessagesForResponses(messages: RuntimeMessage[], supportsVision = false, descriptor?: ProviderDescriptor): JsonObject[] {
   const input: JsonObject[] = [];
   for (const [messageIndex, message] of messages.entries()) {
     if (message.role === "compactionSummary") {
@@ -127,36 +126,37 @@ export function adaptMessagesForResponses(messages: RuntimeMessage[], supportsVi
       const source = Array.isArray(message.content)
         ? message.content
         : [{ type: "text", text: text(message.content) }];
-      const spoken: string[] = [];
-      const calls: JsonObject[] = [];
-      for (const raw of source) {
+      const replay = canReplayMetadata(message, descriptor);
+      const grouped = new Map<string, JsonObject>();
+      const emittedReasoning = new Set<string>();
+      for (const [blockIndex, raw] of source.entries()) {
         const block = record(raw);
-        // Reasoning content cannot be replayed: DeepSeek accepts summaries but
-        // never generates them, so there is nothing faithful to send back.
-        if (block.type === "text") spoken.push(text(block.text));
-        else if (block.type === "tool_call") {
-          calls.push({
-            type: "function_call",
-            call_id: text(block.id),
-            name: text(block.name),
-            arguments: JSON.stringify(record(block.arguments)),
+        if (!completeTool(block)) continue;
+        if (block.type === "thinking") {
+          const item = replay ? replaySignature(block.thinkingSignature) : undefined;
+          if (item?.type === "reasoning" && typeof item.id === "string" && !emittedReasoning.has(item.id)) {
+            input.push(item as JsonObject);
+            emittedReasoning.add(item.id);
+          }
+        } else if (block.type === "text") {
+          const signature = replay ? replaySignature(block.textSignature) : undefined;
+          const id = typeof signature?.id === "string" ? signature.id : `msg_replay_${messageIndex}_${blockIndex}`;
+          let item = grouped.get(id);
+          if (!item) {
+            item = { type: "message", role: "assistant", id, status: "completed", content: [],
+              ...(typeof signature?.phase === "string" ? { phase: signature.phase } : {}) };
+            grouped.set(id, item);
+            input.push(item);
+          }
+          (item.content as JsonObject[]).push({ type: "output_text", text: text(block.text), annotations: [] });
+        } else if (block.type === "tool_call") {
+          input.push({ type: "function_call", call_id: text(block.id), name: text(block.name),
+            arguments: JSON.stringify(block.arguments),
+            ...(replay && typeof block.providerItemId === "string" ? { id: block.providerItemId } : {}),
+            ...(replay && typeof block.namespace === "string" ? { namespace: block.namespace } : {}),
           });
         }
       }
-      const joined = spoken.join("\n").trim();
-      if (joined) {
-        input.push({
-          type: "message",
-          role: "assistant",
-          id: `msg_replay_${messageIndex}`,
-          status: "completed",
-          content: [{ type: "output_text", text: joined, annotations: [] }],
-        });
-      }
-      input.push(...calls.map((call, callIndex) => ({
-        id: `fc_replay_${messageIndex}_${callIndex}`,
-        ...call,
-      })));
       continue;
     }
     if (message.role !== "tool") continue;
@@ -221,7 +221,7 @@ export function buildResponsesRequest(
     ...(user ? { user } : {}),
     model: descriptor.model,
     instructions: request.system.trim(),
-    input: adaptMessagesForResponses(request.messages, descriptor.supportsVision === true),
+    input: adaptMessagesForResponses(request.messages, descriptor.supportsVision === true, descriptor),
     max_output_tokens: descriptor.maxTokens,
     stream: true,
     ...(request.tools.length > 0
@@ -230,79 +230,6 @@ export function buildResponsesRequest(
     ...buildResponsesThinkingPayload(descriptor),
   };
 }
-
-/**
- * Responses reports `input_tokens` inclusive of the cached reads, while the
- * Anthropic wire reports the non-cached part with the caches beside it.
- * Downstream adds the three together to size the context, so this has to hand
- * over the Anthropic shape or every cached token lands in the total twice.
- * Clamped because a provider reporting more cache than input must not turn the
- * fresh count negative.
- */
-const responsesUsage = (usage: unknown): RuntimeUsage => {
-  const value = record(usage);
-  const inputDetails = record(value.input_tokens_details);
-  const inclusiveInput = Math.max(0, Math.trunc(Number(value.input_tokens) || 0));
-  const cacheRead = Math.max(0, Math.trunc(Number(inputDetails.cached_tokens) || 0));
-  return {
-    input_tokens: Math.max(0, inclusiveInput - cacheRead),
-    output_tokens: Math.max(0, Math.trunc(Number(value.output_tokens) || 0)),
-    cache_read_input_tokens: cacheRead,
-    cache_creation_input_tokens: 0,
-  };
-};
-
-/** Maps the terminal Responses payload back onto the runtime's block model. */
-export function responsesContent(output: unknown): RuntimeContentBlock[] {
-  const blocks: RuntimeContentBlock[] = [];
-  for (const raw of Array.isArray(output) ? output : []) {
-    const item = record(raw);
-    if (item.type === "function_call") {
-      let parsed: JsonObject = {};
-      const serialized = text(item.arguments);
-      if (serialized) {
-        try {
-          parsed = record(JSON.parse(serialized)) as JsonObject;
-        } catch {
-          // The raw string is what the model produced; keeping it under a known
-          // key beats dropping the call or inventing arguments it never sent.
-          parsed = { __unparsed_arguments: serialized };
-        }
-      }
-      blocks.push({ type: "tool_call", id: text(item.call_id), name: text(item.name), arguments: parsed });
-      continue;
-    }
-    if (item.type === "reasoning") {
-      const contentThinking = (Array.isArray(item.content) ? item.content : [])
-        .map((entry) => record(entry))
-        .filter((entry) => entry.type === "reasoning_text")
-        .map((entry) => text(entry.text))
-        .join("");
-      const summaryThinking = (Array.isArray(item.summary) ? item.summary : [])
-        .map((entry) => typeof entry === "string" ? entry : text(record(entry).text))
-        .filter(Boolean)
-        .join("\n");
-      const thinking = contentThinking || summaryThinking;
-      if (thinking) blocks.push({ type: "thinking", thinking });
-      continue;
-    }
-    if (item.type !== "message") continue;
-    for (const entry of Array.isArray(item.content) ? item.content : []) {
-      const part = record(entry);
-      if (part.type === "output_text") blocks.push({ type: "text", text: text(part.text) });
-    }
-  }
-  return blocks;
-}
-
-const responsesStopReason = (response: Record<string, unknown>): string => {
-  const status = text(response.status);
-  if (status === "incomplete") return text(record(response.incomplete_details).reason) || "incomplete";
-  if (status === "failed") return "failed";
-  const calls = (Array.isArray(response.output) ? response.output : [])
-    .some((item) => record(item).type === "function_call");
-  return calls ? "tool_use" : "end_turn";
-};
 
 export interface ResponsesClientPort {
   responses: {
@@ -324,6 +251,7 @@ export class ResponsesRuntimeProvider implements RuntimeProvider {
     if (this.injectedClient) return this.injectedClient;
     return new OpenAI({
       apiKey: this.descriptor.apiKey,
+      maxRetries: 0,
       baseURL: this.descriptor.baseURL,
       defaultHeaders: this.descriptor.defaultHeaders,
       fetch: (input, init) => {
@@ -333,7 +261,9 @@ export class ResponsesRuntimeProvider implements RuntimeProvider {
     }) as unknown as ResponsesClientPort;
   }
 
-  async turn(request: RuntimeProviderRequest): Promise<RuntimeTurnResponse> {
+  async turn(request: RuntimeProviderRequest): Promise<AssistantMessage> {
+    const accumulator = new AssistantMessageAccumulator(this.descriptor, request.onEvent);
+    let parseFailure: unknown;
     const watchdog = new ProviderIdleWatchdog(request.signal, this.descriptor.requestIdleTimeoutMs);
     let wireOk = false;
     let wireError = "";
@@ -341,16 +271,12 @@ export class ResponsesRuntimeProvider implements RuntimeProvider {
       try { operation(); } catch { /* Diagnostics must not affect Provider execution. */ }
     };
     try {
+      request.signal.throwIfAborted();
       const parameters = buildResponsesRequest(this.descriptor, request);
       const client = this.clientFor((headers) => {
         wire(() => request.wireTrace?.requestStart(headers, parameters as unknown as JsonObject));
       });
-      let delivery = Promise.resolve();
-      const deliver = (event: RuntimeStreamEvent): void => {
-        if (!request.onEvent) return;
-        delivery = delivery.then(() => request.onEvent?.(event)).then(() => undefined);
-      };
-      const normalizer = new OpenAIResponsesStreamAdapter(deliver);
+      const normalizer = new OpenAIResponsesStreamAdapter(accumulator);
       const stream = client.responses.stream(parameters, { signal: watchdog.signal });
       // Every frame is traced from one catch-all listener, so the diagnostics
       // keep the events this adapter does not map - lifecycle and failure
@@ -361,34 +287,36 @@ export class ResponsesRuntimeProvider implements RuntimeProvider {
           const name = text(record(payload).type) || "event";
           wire(() => request.wireTrace?.event(name, payload));
           try {
+            if (parseFailure) return;
             normalizer.streamEvent(payload);
           } catch (error) {
+            parseFailure = error;
+            watchdog.abort(error);
             wire(() => request.wireTrace?.parseError(name, JSON.stringify(payload ?? null), error));
           }
         });
       });
       const response = record(await stream.finalResponse());
-      normalizer.finish();
-      await delivery;
+      if (parseFailure) throw parseFailure;
+      request.signal.throwIfAborted();
+      const result = normalizer.finalize(response);
+      await accumulator.drain();
       wireOk = true;
-      return {
-        content: responsesContent(response.output),
-        stop_reason: responsesStopReason(response),
-        usage: responsesUsage(response.usage),
-      };
+      return result;
     } catch (error) {
-      wireError = String(error instanceof Error ? error.message : error);
-      if (request.signal.aborted) throw request.signal.reason ?? new DOMException("Aborted", "AbortError");
-      if (watchdog.timedOut()) {
-        throw new RuntimeProviderError(
-          `provider request idle timed out after ${this.descriptor.requestIdleTimeoutMs}ms`,
-          this.descriptor.name,
-          "请求超时",
-          `${this.descriptor.name} 请求超时，请稍后重试。`,
-          true,
-        );
-      }
-      throw normalizeProviderError(error, this.descriptor);
+      const failure = parseFailure ?? error;
+      const classified = request.signal.aborted
+        ? request.signal.reason ?? new DOMException("Aborted", "AbortError")
+        : watchdog.timedOut()
+          ? new RuntimeProviderError(
+              `provider request idle timed out after ${this.descriptor.requestIdleTimeoutMs}ms`,
+              this.descriptor.name, "请求超时", `${this.descriptor.name} 请求超时，请稍后重试。`, true,
+            )
+          : normalizeProviderError(failure, this.descriptor);
+      wireError = String(classified instanceof Error ? classified.message : classified);
+      accumulator.fail(request.signal.aborted ? "aborted" : "error", classified);
+      await accumulator.drain();
+      throw classified;
     } finally {
       wire(() => request.wireTrace?.end(wireOk, wireError));
       watchdog.cleanup();
@@ -405,7 +333,7 @@ export class ResponsesRuntimeProvider implements RuntimeProvider {
       const stream = this.clientFor().responses.stream({
         model: this.descriptor.model,
         instructions: SUMMARY_SYSTEM_PROMPT,
-        input: adaptMessagesForResponses(request.messages, this.descriptor.supportsVision === true),
+        input: adaptMessagesForResponses(request.messages, this.descriptor.supportsVision === true, this.descriptor),
         max_output_tokens: maxOutputTokens,
         stream: true,
         ...(providerUserIdentifier(request.userIdentity)
@@ -420,12 +348,14 @@ export class ResponsesRuntimeProvider implements RuntimeProvider {
         stream.on?.("response.output_item.done", () => watchdog.activity());
       } catch { /* Diagnostics/activity hooks must not replace Provider behavior. */ }
       const response = record(await stream.finalResponse());
-      const summary = responsesContent(response.output)
+      const result = new OpenAIResponsesStreamAdapter(new AssistantMessageAccumulator(this.descriptor)).finalize(response);
+      const summary = result.content
         .filter((block) => record(block).type === "text")
         .map((block) => text(record(block).text))
         .join("")
         .trim();
-      return { text: summary, usage: responsesUsage(response.usage) };
+      const { status: _status, ...usage } = result.usage;
+      return { text: summary, usage };
     } catch (error) {
       if (request.signal.aborted) throw request.signal.reason ?? new DOMException("Aborted", "AbortError");
       if (watchdog.timedOut()) {

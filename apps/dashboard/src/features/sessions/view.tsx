@@ -889,6 +889,7 @@ const LiveThinkingPart = React.memo(function LiveThinkingPart({
   const text = usePacedText(part.text, part.status === "streaming");
   return (
     <div className="process-message-content">
+      {part.status === "error" ? <div className="process-thinking-text">{t.conversation.error}</div> : null}
       {text ? <div className="process-thinking-text">{text}</div> : null}
       {Array.from({ length: part.redacted_count }, (_, index) => (
         <div className="process-thinking-text redacted" key={index}>{t.message.redactedThinking}</div>
@@ -904,11 +905,13 @@ const LiveTextPart = React.memo(function LiveTextPart({
   part: Extract<TurnProcessPart, { type: "text" }>;
   presentation: LiveTimelineItem["presentation"];
 }) {
+  const t = useUiText();
   const className = presentation === "final"
     ? "timeline-text message-card role-assistant response-final-answer"
     : "timeline-text process-message-content";
   return (
     <div className={className}>
+      {part.status === "error" ? <div className="process-thinking-text">{t.conversation.error}</div> : null}
       <MessageMarkdown streaming={part.status === "streaming"} text={part.text} />
     </div>
   );

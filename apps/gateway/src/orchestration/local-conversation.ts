@@ -639,7 +639,7 @@ function sanitizeProcessParts(value: unknown): TurnProcessPart[] | undefined {
     lastSequence = sequence;
     if (type === "thinking") {
       const status = clean(part.status);
-      if (status !== "streaming" && status !== "completed") return undefined;
+      if (status !== "streaming" && status !== "completed" && status !== "error") return undefined;
       const redactedCount = Math.trunc(Number(part.redacted_count));
       if (!Number.isSafeInteger(redactedCount) || redactedCount < 0) return undefined;
       result.push({
@@ -655,7 +655,7 @@ function sanitizeProcessParts(value: unknown): TurnProcessPart[] | undefined {
     if (type === "text") {
       const status = clean(part.status);
       const presentation = clean(part.presentation);
-      if ((status !== "streaming" && status !== "completed") ||
+      if ((status !== "streaming" && status !== "completed" && status !== "error") ||
         (presentation !== "process" && presentation !== "final")) return undefined;
       result.push({
         type,

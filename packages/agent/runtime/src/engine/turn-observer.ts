@@ -1,5 +1,5 @@
 import { createLogger, type Logger } from "@lxe/core";
-import type { RuntimeStreamEvent, RuntimeTurnResponse } from "./types";
+import type { AssistantMessageEvent, AssistantMessage } from "./types";
 
 const PROVIDER_STREAM_HEARTBEAT_MS = 1_000;
 const PROVIDER_STREAM_HEARTBEAT_CHARS = 300;
@@ -69,11 +69,11 @@ export class RuntimeProviderAttemptObserver {
     this.lastHeartbeatAt = this.startedAt;
   }
 
-  stream(event: RuntimeStreamEvent): void {
+  stream(event: AssistantMessageEvent): void {
     this.snapshot.eventCount += 1;
-    if (event.type === "text_delta") this.snapshot.textChars += event.text.length;
-    else if (event.type === "thinking_delta") this.snapshot.thinkingChars += event.thinking.length;
-    else if (event.type === "redacted_thinking") this.snapshot.redactedThinkingBlocks += 1;
+    if (event.type === "text_delta") this.snapshot.textChars += event.delta.length;
+    else if (event.type === "thinking_delta") this.snapshot.thinkingChars += event.delta.length;
+    else if (event.type === "thinking_start" && event.partial.content[event.contentIndex]?.redacted === true) this.snapshot.redactedThinkingBlocks += 1;
     const now = this.owner.now();
     const visibleChars = this.snapshot.textChars + this.snapshot.thinkingChars;
     if (
@@ -90,7 +90,7 @@ export class RuntimeProviderAttemptObserver {
     this.lastHeartbeatChars = visibleChars;
   }
 
-  succeed(response: RuntimeTurnResponse): void {
+  succeed(response: AssistantMessage): void {
     if (this.completed) return;
     this.completed = true;
     this.snapshot.toolUseCount = response.content.filter((block) => block.type === "tool_call").length;
@@ -100,7 +100,7 @@ export class RuntimeProviderAttemptObserver {
       latency_ms: Math.max(0, this.owner.now() - this.startedAt),
       input_tokens: response.usage.input_tokens,
       output_tokens: response.usage.output_tokens,
-      stop_reason: response.stop_reason,
+      stop_reason: response.stopReason,
       ...streamFields(this.snapshot),
     });
   }

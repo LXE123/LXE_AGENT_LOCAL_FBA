@@ -1,3 +1,4 @@
+import { messageFixture } from "../message-fixtures";
 import { afterEach, describe, expect, test } from "bun:test";
 import { appendFileSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -511,4 +512,24 @@ describe("SqliteRuntimeStore", () => {
     expect(existsSync(root)).toBe(false);
     roots.splice(roots.indexOf(root), 1);
   });
+});
+
+test("retains assistant origin and replay metadata across a cold transcript reload", async () => {
+  const root = mkdtempSync(join(tmpdir(), "lxe-assistant-roundtrip-"));
+  roots.push(root);
+  const path = join(root, "agent.sqlite3");
+  const message = messageFixture({ api: "openai_responses", responseId: "resp_1", content: [
+    { type: "thinking", thinking: "plan", thinkingSignature: JSON.stringify({ type: "reasoning", id: "rs_1", encrypted_content: "opaque" }) },
+    { type: "tool_call", id: "call_1", providerItemId: "fc_1", name: "read", arguments: { path: "a" }, namespace: "files" },
+    { type: "text", text: "answer", textSignature: JSON.stringify({ v: 1, id: "msg_1" }) },
+  ] });
+  const store = new SqliteRuntimeStore(path);
+  await store.start();
+  await store.ensureSession({ workspace: testWorkspace, session_id: "s1", source: { platform: "desktop" } });
+  await store.appendMessage("s1", message);
+  await store.stop();
+  const reopened = new SqliteRuntimeStore(path);
+  await reopened.start();
+  try { expect(await reopened.loadMessages("s1")).toEqual([message]); }
+  finally { await reopened.stop(); }
 });

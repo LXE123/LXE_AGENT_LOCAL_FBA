@@ -51,12 +51,12 @@ import type {
   RuntimeSkillSnapshot,
   RuntimeWorkspaceInstanceProvider,
   RuntimeStore,
-  RuntimeStreamEvent,
+  AssistantMessageEvent,
   SystemPromptContext,
   SkillActivationUsage,
   SkillExecutionUsage,
   RuntimeTurnContextRecord,
-  RuntimeTurnResponse,
+  AssistantMessage,
   RuntimeUsage,
   ToolResultBlock,
   ToolCallBlock,
@@ -280,6 +280,17 @@ export class TypeScriptAgentRuntime implements AgentRuntime {
     const emittedArtifactPaths = new Set<string>();
     const toolRecoveryAttempts = new Map<string, number>();
     let usageRecorded = false;
+    const accountedMessages = new Set<string>();
+    const accountMessage = (message: AssistantMessage): void => {
+      if (accountedMessages.has(message.id)) return;
+      accountedMessages.add(message.id);
+      const usage = message.usage;
+      inputTokens += Math.max(0, Math.trunc(usage.input_tokens));
+      outputTokens += Math.max(0, Math.trunc(usage.output_tokens));
+      cacheReadTokens += Math.max(0, Math.trunc(usage.cache_read_input_tokens ?? 0));
+      cacheCreationTokens += Math.max(0, Math.trunc(usage.cache_creation_input_tokens ?? 0));
+      if (usage.status !== "unreported") finalAnswerStreamer?.updateUsage(usage);
+    };
     const accountContext = (result: ContextCompactionResult): void => {
       const usage: TurnUsageTotals = {
         input: inputTokens,
@@ -492,13 +503,15 @@ export class TypeScriptAgentRuntime implements AgentRuntime {
           signal: handle.signal,
           userIdentity,
           ...(wireTrace ? { wireTrace } : {}),
-          onEvent: async (event: RuntimeStreamEvent) => {
+          onEvent: async (event: AssistantMessageEvent) => {
+            if (event.type === "done") accountMessage(event.message);
+            if (event.type === "error") accountMessage(event.error);
             attemptObserver.stream(event);
             if (!isCancelled(handle)) await finalAnswerStreamer?.pushEvent(event);
           },
         });
         let providerAttemptOrdinal = 0;
-        const invokeProvider = async (maximumAttempts = DEFAULT_PROVIDER_ATTEMPTS): Promise<RuntimeTurnResponse> => {
+        const invokeProvider = async (maximumAttempts = DEFAULT_PROVIDER_ATTEMPTS): Promise<AssistantMessage> => {
           let lastError: unknown;
           for (let attempt = 1; attempt <= maximumAttempts; attempt += 1) {
             providerAttemptOrdinal += 1;
@@ -520,6 +533,7 @@ export class TypeScriptAgentRuntime implements AgentRuntime {
             try {
               await finalAnswerStreamer?.startWaitingModel();
               const response = await provider.turn(providerRequest(attemptObserver, wireTrace));
+              accountMessage(response);
               attemptObserver.succeed(response);
               return response;
             } catch (error) {
@@ -563,12 +577,7 @@ export class TypeScriptAgentRuntime implements AgentRuntime {
           if (!overflow.compacted || overflow.hardLimitExceeded) throw error;
           response = await invokeProvider(1);
         }
-        inputTokens += Math.max(0, Math.trunc(response.usage.input_tokens));
-        outputTokens += Math.max(0, Math.trunc(response.usage.output_tokens));
-        cacheReadTokens += Math.max(0, Math.trunc(response.usage.cache_read_input_tokens ?? 0));
-        cacheCreationTokens += Math.max(0, Math.trunc(response.usage.cache_creation_input_tokens ?? 0));
-        finalAnswerStreamer?.updateUsage(response.usage);
-        const calls = toolCallBlocks(response.content);
+        const calls = response.stopReason === "toolUse" ? toolCallBlocks(response.content) : [];
         const forcedLastStepReply = isLastStep && calls.length > 0
           ? textContent(response.content) || MAX_STEP_REPLY
           : "";
@@ -577,7 +586,9 @@ export class TypeScriptAgentRuntime implements AgentRuntime {
         const assistantContent: RuntimeContentBlock[] = forcedLastStepReply
           ? [{ type: "text", text: forcedLastStepReply }]
           : response.content;
-        const assistant: RuntimeMessage = { role: "assistant", content: assistantContent };
+        const assistant: RuntimeMessage = forcedLastStepReply
+          ? { role: "assistant", content: assistantContent }
+          : response;
         messages.push(assistant);
         await this.appendMessage(job.session_id, assistant, "assistant_response", job.job_id);
         if (calls.length === 0 || isLastStep) {

@@ -1,3 +1,4 @@
+import { messageFixture, eventFixture } from "../message-fixtures";
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { createLogger, repositoryRoot, resolveWorkspaceContext } from "@lxe/core";
@@ -17,7 +18,7 @@ import type {
   RuntimeProviderRequest,
   RuntimeStore,
   RuntimeTurnContextRecord,
-  RuntimeTurnResponse,
+  AssistantMessage,
 } from "../../src/engine/types";
 
 const workspace = resolveWorkspaceContext(repositoryRoot(import.meta.dir));
@@ -143,11 +144,11 @@ describe("TypeScriptAgentRuntime", () => {
       tools: new ToolRegistry(),
       provider: {
         summarize,
-        turn: async () => ({
+        turn: async () => (messageFixture({
           content: [{ type: "text", text: "done" }],
-          stop_reason: "end_turn",
+          stopReason: "stop",
           usage: { input_tokens: 1, output_tokens: 1 },
-        }),
+        })),
       },
       emitter: { emit: async () => undefined, typing: async () => undefined },
       systemPrompt: "test",
@@ -175,11 +176,11 @@ describe("TypeScriptAgentRuntime", () => {
       tools: new ToolRegistry(),
       provider: {
         summarize,
-        turn: async () => ({
+        turn: async () => (messageFixture({
           content: [{ type: "text", text: "done" }],
-          stop_reason: "end_turn",
+          stopReason: "stop",
           usage: { input_tokens: 1, output_tokens: 1 },
-        }),
+        })),
       },
       emitter: { emit: async () => undefined, typing: async () => undefined },
       systemPrompt: "test",
@@ -198,11 +199,11 @@ describe("TypeScriptAgentRuntime", () => {
       tools: new ToolRegistry(),
       provider: {
         summarize,
-        turn: async () => ({
+        turn: async () => (messageFixture({
           content: [{ type: "text", text: "unreachable" }],
-          stop_reason: "end_turn",
+          stopReason: "stop",
           usage: { input_tokens: 1, output_tokens: 1 },
-        }),
+        })),
       },
       emitter: { emit: async () => undefined, typing: async () => undefined },
       systemPrompt: "test",
@@ -225,11 +226,11 @@ describe("TypeScriptAgentRuntime", () => {
         summarize,
         turn: async (request) => {
           observedUserContent = [...request.messages].reverse().find((message) => message.role === "user")?.content;
-          return {
+          return messageFixture({
             content: [{ type: "text", text: "done" }],
-            stop_reason: "end_turn",
+            stopReason: "stop",
             usage: { input_tokens: 1, output_tokens: 1 },
-          };
+          });
         },
       },
       emitter: { emit: async () => undefined, typing: async () => undefined },
@@ -282,26 +283,26 @@ describe("TypeScriptAgentRuntime", () => {
           // A cache hit bills only the remainder as input_tokens, so a turn that
           // reports 207 has really sent 207 + 16128 + 64 tokens.
           return providerCalls === 1
-            ? {
+            ? messageFixture({
                 content: [{ type: "tool_call", id: "probe-1", name: "probe", arguments: {} }],
-                stop_reason: "tool_use",
+                stopReason: "toolUse",
                 usage: {
                   input_tokens: 207,
                   output_tokens: 310,
                   cache_read_input_tokens: 16_128,
                   cache_creation_input_tokens: 64,
                 },
-              }
-            : {
+              })
+            : messageFixture({
                 content: [{ type: "text", text: "done" }],
-                stop_reason: "end_turn",
+                stopReason: "stop",
                 usage: {
                   input_tokens: 12,
                   output_tokens: 8,
                   cache_read_input_tokens: 16_400,
                   cache_creation_input_tokens: 0,
                 },
-              };
+              });
         },
       },
       emitter: { emit: async () => undefined, typing: async () => undefined },
@@ -325,11 +326,11 @@ describe("TypeScriptAgentRuntime", () => {
       tools: new ToolRegistry(),
       provider: {
         summarize,
-        turn: async () => ({
+        turn: async () => (messageFixture({
           content: [{ type: "text", text: "done" }],
-          stop_reason: "end_turn",
+          stopReason: "stop",
           usage: { input_tokens: 5, output_tokens: 6 },
-        }),
+        })),
       },
       emitter: { emit: async () => undefined, typing: async () => undefined },
       systemPrompt: "test",
@@ -384,8 +385,8 @@ describe("TypeScriptAgentRuntime", () => {
         turn: async () => {
           providerCalls += 1;
           return providerCalls === 1
-            ? { content: [{ type: "tool_call", id: "probe-1", name: "probe", arguments: {} }], stop_reason: "tool_use", usage: { input_tokens: 1, output_tokens: 1 } }
-            : { content: [{ type: "text", text: "done" }], stop_reason: "end_turn", usage: { input_tokens: 1, output_tokens: 1 } };
+            ? messageFixture({ content: [{ type: "tool_call", id: "probe-1", name: "probe", arguments: {} }], stopReason: "toolUse", usage: { input_tokens: 1, output_tokens: 1 } })
+            : messageFixture({ content: [{ type: "text", text: "done" }], stopReason: "stop", usage: { input_tokens: 1, output_tokens: 1 } });
         },
       },
       systemPrompt: (context) => {
@@ -458,16 +459,16 @@ describe("TypeScriptAgentRuntime", () => {
       provider: { summarize, turn: async (request) => {
         providerCalls += 1;
         if (providerCalls === 1) {
-          return {
+          return messageFixture({
             content: [{
               type: "tool_call", id: "bad", name: "exec",
               arguments: {
                 command: "cd /Users/llxx/Projects/github/LXE_AGENT_LOCAL_FBA && uv run --frozen python -m services.agent_cli.mabang.download_shipment_delivery --delivery-no SP260703001",
               },
             }],
-            stop_reason: "tool_use",
+            stopReason: "toolUse",
             usage: { input_tokens: 1, output_tokens: 1 },
-          };
+          });
         }
         if (providerCalls === 2) {
           const last = request.messages.at(-1)?.content;
@@ -480,20 +481,20 @@ describe("TypeScriptAgentRuntime", () => {
             discovery_command: "lxeskill list",
             next_action: "read_owner_skill_or_run_standalone_describe_then_retry_once",
           });
-          return {
+          return messageFixture({
             content: [{
               type: "tool_call", id: "good", name: "exec",
               arguments: { command: "lxeskill fba shipment delivery-csv-download --delivery-no SP260703001" },
             }],
-            stop_reason: "tool_use",
+            stopReason: "toolUse",
             usage: { input_tokens: 1, output_tokens: 1 },
-          };
+          });
         }
-        return {
+        return messageFixture({
           content: [{ type: "text", text: "complete" }],
-          stop_reason: "end_turn",
+          stopReason: "stop",
           usage: { input_tokens: 1, output_tokens: 1 },
-        };
+        });
       } },
       emitter: {
         emit: async (request) => { emitted.push(request); },
@@ -525,12 +526,12 @@ describe("TypeScriptAgentRuntime", () => {
       input_schema: { type: "object" },
       execute: async () => { throw lxeSkillInvocationError(); },
     });
-    const responses: RuntimeTurnResponse[] = [
-      { content: [{ type: "tool_call", id: "bad-1", name: "exec", arguments: {} }], stop_reason: "tool_use", usage: { input_tokens: 1, output_tokens: 1 } },
-      { content: [{ type: "tool_call", id: "bad-2", name: "exec", arguments: {} }], stop_reason: "tool_use", usage: { input_tokens: 1, output_tokens: 1 } },
-      { content: [{ type: "text", text: "stopped" }], stop_reason: "end_turn", usage: { input_tokens: 1, output_tokens: 1 } },
-      { content: [{ type: "tool_call", id: "bad-3", name: "exec", arguments: {} }], stop_reason: "tool_use", usage: { input_tokens: 1, output_tokens: 1 } },
-      { content: [{ type: "text", text: "stopped" }], stop_reason: "end_turn", usage: { input_tokens: 1, output_tokens: 1 } },
+    const responses: AssistantMessage[] = [
+      messageFixture({ content: [{ type: "tool_call", id: "bad-1", name: "exec", arguments: {} }], stopReason: "toolUse", usage: { input_tokens: 1, output_tokens: 1 } }),
+      messageFixture({ content: [{ type: "tool_call", id: "bad-2", name: "exec", arguments: {} }], stopReason: "toolUse", usage: { input_tokens: 1, output_tokens: 1 } }),
+      messageFixture({ content: [{ type: "text", text: "stopped" }], stopReason: "stop", usage: { input_tokens: 1, output_tokens: 1 } }),
+      messageFixture({ content: [{ type: "tool_call", id: "bad-3", name: "exec", arguments: {} }], stopReason: "toolUse", usage: { input_tokens: 1, output_tokens: 1 } }),
+      messageFixture({ content: [{ type: "text", text: "stopped" }], stopReason: "stop", usage: { input_tokens: 1, output_tokens: 1 } }),
     ];
     const runtime = new TypeScriptAgentRuntime({
       store,
@@ -598,17 +599,17 @@ describe("TypeScriptAgentRuntime", () => {
         return { content: [{ type: "text", text: "done" }] };
       },
     });
-    const responses: RuntimeTurnResponse[] = [
-      { content: [
+    const responses: AssistantMessage[] = [
+      messageFixture({ content: [
         { type: "tool_call", id: "read-1", name: "read", arguments: {} },
         { type: "tool_call", id: "read-2", name: "read", arguments: {} },
-      ], stop_reason: "tool_use", usage: { input_tokens: 1, output_tokens: 1 } },
-      { content: [{ type: "text", text: "complete" }], stop_reason: "end_turn", usage: { input_tokens: 1, output_tokens: 1 } },
-      { content: [
+      ], stopReason: "toolUse", usage: { input_tokens: 1, output_tokens: 1 } }),
+      messageFixture({ content: [{ type: "text", text: "complete" }], stopReason: "stop", usage: { input_tokens: 1, output_tokens: 1 } }),
+      messageFixture({ content: [
         { type: "tool_call", id: "exec-1", name: "exec", arguments: { command: "lxeskill replenish store resolve --store-name Demo" } },
         { type: "tool_call", id: "exec-2", name: "exec", arguments: { command: "lxeskill replenish store resolve --store-name Demo", fail: true } },
-      ], stop_reason: "tool_use", usage: { input_tokens: 1, output_tokens: 1 } },
-      { content: [{ type: "text", text: "complete" }], stop_reason: "end_turn", usage: { input_tokens: 1, output_tokens: 1 } },
+      ], stopReason: "toolUse", usage: { input_tokens: 1, output_tokens: 1 } }),
+      messageFixture({ content: [{ type: "text", text: "complete" }], stopReason: "stop", usage: { input_tokens: 1, output_tokens: 1 } }),
     ];
     const runtime = new TypeScriptAgentRuntime({
       store,
@@ -697,9 +698,9 @@ describe("TypeScriptAgentRuntime", () => {
       ownerSkills: ["demo-skill"],
       execute: async () => ({ content: [{ type: "text", text: "done" }] }),
     });
-    const responses: RuntimeTurnResponse[] = [
-      { content: [{ type: "tool_call", id: "tool-1", name: "owned_tool", arguments: {} }], stop_reason: "tool_use", usage: { input_tokens: 1, output_tokens: 1 } },
-      { content: [{ type: "text", text: "complete" }], stop_reason: "end_turn", usage: { input_tokens: 1, output_tokens: 1 } },
+    const responses: AssistantMessage[] = [
+      messageFixture({ content: [{ type: "tool_call", id: "tool-1", name: "owned_tool", arguments: {} }], stopReason: "toolUse", usage: { input_tokens: 1, output_tokens: 1 } }),
+      messageFixture({ content: [{ type: "text", text: "complete" }], stopReason: "stop", usage: { input_tokens: 1, output_tokens: 1 } }),
     ];
     const runtime = new TypeScriptAgentRuntime({
       store,
@@ -815,11 +816,11 @@ describe("TypeScriptAgentRuntime", () => {
             firstEntered();
             await firstReleasePromise;
           }
-          return {
+          return messageFixture({
             content: [{ type: "text", text: "done" }],
-            stop_reason: "end_turn",
+            stopReason: "stop",
             usage: { input_tokens: 1, output_tokens: 1 },
-          };
+          });
         },
       },
       emitter: { emit: async () => undefined, typing: async () => undefined },
@@ -865,11 +866,11 @@ describe("TypeScriptAgentRuntime", () => {
         summarize,
         turn: async (request) => {
           captured = request;
-          return {
+          return messageFixture({
             content: [{ type: "text", text: "done" }],
-            stop_reason: "end_turn",
+            stopReason: "stop",
             usage: { input_tokens: 1, output_tokens: 1 },
-          };
+          });
         },
       },
       emitter: { emit: async () => undefined, typing: async () => undefined },
@@ -903,11 +904,11 @@ describe("TypeScriptAgentRuntime", () => {
         summarize,
         turn: async (request) => {
           requests.push(request);
-          return {
+          return messageFixture({
             content: [{ type: "text", text: "done" }],
-            stop_reason: "end_turn",
+            stopReason: "stop",
             usage: { input_tokens: 1, output_tokens: 1 },
-          };
+          });
         },
       },
       emitter: { emit: async () => undefined, typing: async () => undefined },
@@ -961,11 +962,11 @@ describe("TypeScriptAgentRuntime", () => {
         summarize,
         turn: async (request) => {
           captured = request;
-          return {
+          return messageFixture({
             content: [{ type: "text", text: "done" }],
-            stop_reason: "end_turn",
+            stopReason: "stop",
             usage: { input_tokens: 1, output_tokens: 1 },
-          };
+          });
         },
       },
       emitter: { emit: async () => undefined, typing: async () => undefined },
@@ -996,11 +997,11 @@ describe("TypeScriptAgentRuntime", () => {
         summarize,
         turn: async (request) => {
           captured = request;
-          return {
+          return messageFixture({
             content: [{ type: "text", text: "刷新已完成。" }],
-            stop_reason: "end_turn",
+            stopReason: "stop",
             usage: { input_tokens: 3, output_tokens: 2 },
-          };
+          });
         },
       },
       emitter: { emit: async () => undefined, typing: async () => undefined },
@@ -1021,11 +1022,11 @@ describe("TypeScriptAgentRuntime", () => {
     const store = new MemoryStore();
     const provider = {
       summarize,
-      turn: async (): Promise<RuntimeTurnResponse> => ({
+      turn: async (): Promise<AssistantMessage> => (messageFixture({
         content: [{ type: "text", text: "done" }],
-        stop_reason: "end_turn",
+        stopReason: "stop",
         usage: { input_tokens: 1, output_tokens: 1 },
-      }),
+      })),
     };
     const snapshot: RuntimeProviderSnapshot = {
       generation: 7,
@@ -1101,14 +1102,14 @@ describe("TypeScriptAgentRuntime", () => {
         summarize,
         turn: async (request) => {
           requests.push({ tools: request.tools, toolChoice: request.toolChoice });
-          return {
+          return messageFixture({
             content: [
               { type: "text", text: "Here is the available result." },
               { type: "tool_call", id: "late", name: "danger", arguments: {} },
             ],
-            stop_reason: "tool_use",
+            stopReason: "toolUse",
             usage: { input_tokens: 1, output_tokens: 1 },
-          };
+          });
         },
       },
       emitter: { emit: async () => undefined, typing: async () => undefined },
@@ -1123,17 +1124,17 @@ describe("TypeScriptAgentRuntime", () => {
   });
 
   test("closes a tool call, persists canonical messages, and emits the final answer", async () => {
-    const responses: RuntimeTurnResponse[] = [
-      {
+    const responses: AssistantMessage[] = [
+      messageFixture({
         content: [{ type: "tool_call", id: "tool-1", name: "echo", arguments: { text: "hi" } }],
-        stop_reason: "tool_use",
+        stopReason: "toolUse",
         usage: { input_tokens: 10, output_tokens: 2 },
-      },
-      {
+      }),
+      messageFixture({
         content: [{ type: "text", text: "done" }],
-        stop_reason: "end_turn",
+        stopReason: "stop",
         usage: { input_tokens: 5, output_tokens: 1 },
-      },
+      }),
     ];
     const store = new MemoryStore();
     const tools = new ToolRegistry();
@@ -1153,7 +1154,7 @@ describe("TypeScriptAgentRuntime", () => {
       tools,
       provider: { summarize, turn: async (request) => {
         if (responses.length === 2) await Bun.sleep(160);
-        if (responses.length === 1) await request.onEvent?.({ type: "text_delta", part_id: "text-1", text: "done" });
+        if (responses.length === 1) await request.onEvent?.(eventFixture("text_delta", "text-1", "done"));
         return responses.shift()!;
       } },
       emitter: { emit: async (request) => { emitted.push(request); }, typing: async () => undefined },
@@ -1213,8 +1214,8 @@ describe("TypeScriptAgentRuntime", () => {
   });
 
   test("runs only adjacent opted-in tools concurrently and preserves result order across barriers", async () => {
-    const responses: RuntimeTurnResponse[] = [
-      {
+    const responses: AssistantMessage[] = [
+      messageFixture({
         content: [
           { type: "tool_call", id: "t1", name: "exec", arguments: { label: "a", delay: 80 } },
           { type: "tool_call", id: "t2", name: "exec", arguments: { label: "b", delay: 20, fail: true } },
@@ -1222,14 +1223,14 @@ describe("TypeScriptAgentRuntime", () => {
           { type: "tool_call", id: "t4", name: "wait", arguments: { label: "c", delay: 40 } },
           { type: "tool_call", id: "t5", name: "wait", arguments: { label: "d", delay: 40 } },
         ],
-        stop_reason: "tool_use",
+        stopReason: "toolUse",
         usage: { input_tokens: 1, output_tokens: 1 },
-      },
-      {
+      }),
+      messageFixture({
         content: [{ type: "text", text: "done" }],
-        stop_reason: "end_turn",
+        stopReason: "stop",
         usage: { input_tokens: 1, output_tokens: 1 },
-      },
+      }),
     ];
     const store = new MemoryStore();
     const tools = new ToolRegistry();
@@ -1302,12 +1303,12 @@ describe("TypeScriptAgentRuntime", () => {
       provider: {
         summarize,
         turn: async (request) => {
-          await request.onEvent?.({ type: "text_delta", part_id: "text-1", text: "desktop answer" });
-          return {
+          await request.onEvent?.(eventFixture("text_delta", "text-1", "desktop answer"));
+          return messageFixture({
             content: [{ type: "text", text: "desktop answer" }],
-            stop_reason: "end_turn",
+            stopReason: "stop",
             usage: { input_tokens: 1, output_tokens: 2 },
-          };
+          });
         },
       },
       emitter: { emit: async (request) => { emitted.push(request); }, typing: async () => undefined },
@@ -1341,16 +1342,16 @@ describe("TypeScriptAgentRuntime", () => {
       provider: {
         summarize,
         turn: async (request) => {
-          await request.onEvent?.({ type: "text_start", part_id: "answer-1" });
+          await request.onEvent?.(eventFixture("text_start", "answer-1", ""));
           for (const text of ["desktop ", "answer"]) {
-            await request.onEvent?.({ type: "text_delta", part_id: "answer-1", text });
+            await request.onEvent?.(eventFixture("text_delta", "answer-1", text));
           }
-          await request.onEvent?.({ type: "text_end", part_id: "answer-1" });
-          return {
+          await request.onEvent?.(eventFixture("text_end", "answer-1", ""));
+          return messageFixture({
             content: [{ type: "text", text: "desktop answer" }],
-            stop_reason: "end_turn",
+            stopReason: "stop",
             usage: { input_tokens: 1, output_tokens: 2 },
-          };
+          });
         },
       },
       emitter: {
@@ -1383,17 +1384,17 @@ describe("TypeScriptAgentRuntime", () => {
   test("keeps desktop tool paths local and includes successful live results", async () => {
     const artifact = "/private/var/artifacts/report.json";
     const streamFor = async (platform: string): Promise<{ detail: string; results: string[] }> => {
-      const responses: RuntimeTurnResponse[] = [
-        {
+      const responses: AssistantMessage[] = [
+        messageFixture({
           content: [{ type: "tool_call", id: "tool-1", name: "read", arguments: { path: artifact } }],
-          stop_reason: "tool_use",
+          stopReason: "toolUse",
           usage: { input_tokens: 1, output_tokens: 1 },
-        },
-        {
+        }),
+        messageFixture({
           content: [{ type: "text", text: "done" }],
-          stop_reason: "end_turn",
+          stopReason: "stop",
           usage: { input_tokens: 1, output_tokens: 1 },
-        },
+        }),
       ];
       const tools = new ToolRegistry();
       tools.register({
@@ -1451,12 +1452,12 @@ describe("TypeScriptAgentRuntime", () => {
       provider: {
         summarize,
         turn: async (request) => {
-          await request.onEvent?.({ type: "text_delta", part_id: "text-1", text: "cli answer" });
-          return {
+          await request.onEvent?.(eventFixture("text_delta", "text-1", "cli answer"));
+          return messageFixture({
             content: [{ type: "text", text: "cli answer" }],
-            stop_reason: "end_turn",
+            stopReason: "stop",
             usage: { input_tokens: 1, output_tokens: 2 },
-          };
+          });
         },
       },
       emitter: { emit: async (request) => { emitted.push(request); }, typing: async () => undefined },
@@ -1476,17 +1477,17 @@ describe("TypeScriptAgentRuntime", () => {
   });
 
   test("persists tool state patches and records emitted files as artifacts", async () => {
-    const responses: RuntimeTurnResponse[] = [
-      {
+    const responses: AssistantMessage[] = [
+      messageFixture({
         content: [{ type: "tool_call", id: "tool-1", name: "bridge", arguments: {} }],
-        stop_reason: "tool_use",
+        stopReason: "toolUse",
         usage: { input_tokens: 1, output_tokens: 1 },
-      },
-      {
+      }),
+      messageFixture({
         content: [{ type: "text", text: "done" }],
-        stop_reason: "end_turn",
+        stopReason: "stop",
         usage: { input_tokens: 1, output_tokens: 1 },
-      },
+      }),
     ];
     const store = new MemoryStore();
     const tools = new ToolRegistry();
@@ -1534,17 +1535,17 @@ describe("TypeScriptAgentRuntime", () => {
   });
 
   test("keeps a yielded tool visually running and passes its tool call id to the handler", async () => {
-    const responses: RuntimeTurnResponse[] = [
-      {
+    const responses: AssistantMessage[] = [
+      messageFixture({
         content: [{ type: "tool_call", id: "tool-exec-1", name: "exec", arguments: { command: "sleep" } }],
-        stop_reason: "tool_use",
+        stopReason: "toolUse",
         usage: { input_tokens: 1, output_tokens: 1 },
-      },
-      {
+      }),
+      messageFixture({
         content: [{ type: "text", text: "detached" }],
-        stop_reason: "end_turn",
+        stopReason: "stop",
         usage: { input_tokens: 1, output_tokens: 1 },
-      },
+      }),
     ];
     const store = new MemoryStore();
     const tools = new ToolRegistry();
@@ -1598,18 +1599,18 @@ describe("TypeScriptAgentRuntime", () => {
       provider: { summarize, turn: async (request) => {
         providerCalls += 1;
         if (providerCalls === 1) {
-          return {
+          return messageFixture({
             content: [{ type: "tool_call", id: "tool-1", name: "report", arguments: {} }],
-            stop_reason: "tool_use",
+            stopReason: "toolUse",
             usage: { input_tokens: 1, output_tokens: 1 },
-          };
+          });
         }
         secondRequestMessages = request.messages;
-        return {
+        return messageFixture({
           content: [{ type: "text", text: "delivery failed" }],
-          stop_reason: "end_turn",
+          stopReason: "stop",
           usage: { input_tokens: 1, output_tokens: 1 },
-        };
+        });
       } },
       emitter: {
         emit: async (request) => {
@@ -1649,15 +1650,15 @@ describe("TypeScriptAgentRuntime", () => {
       tools,
       provider: { summarize, turn: async () => {
         providerCalls += 1;
-        return providerCalls === 1 ? {
+        return providerCalls === 1 ? messageFixture({
           content: [{ type: "tool_call", id: "tool-1", name: "reports", arguments: {} }],
-          stop_reason: "tool_use",
+          stopReason: "toolUse",
           usage: { input_tokens: 1, output_tokens: 1 },
-        } : {
+        }) : messageFixture({
           content: [{ type: "text", text: "partial delivery reported" }],
-          stop_reason: "end_turn",
+          stopReason: "stop",
           usage: { input_tokens: 1, output_tokens: 1 },
-        };
+        });
       } },
       emitter: {
         emit: async (request) => {
@@ -1699,21 +1700,21 @@ describe("TypeScriptAgentRuntime", () => {
       tools,
       provider: { summarize, turn: async (request) => {
         providerCalls += 1;
-        await request.onEvent?.({ type: "text_delta", part_id: "text-1", text: "d" });
-        await request.onEvent?.({ type: "text_delta", part_id: "text-1", text: "o" });
+        await request.onEvent?.(eventFixture("text_delta", "text-1", "d"));
+        await request.onEvent?.(eventFixture("text_delta", "text-1", "o"));
         if (providerCalls === 1) {
-          return {
+          return messageFixture({
             content: [{ type: "tool_call", id: "tool-1", name: "noop", arguments: {} }],
-            stop_reason: "tool_use",
+            stopReason: "toolUse",
             usage: { input_tokens: 2, output_tokens: 1 },
-          };
+          });
         }
-        await request.onEvent?.({ type: "text_delta", part_id: "text-1", text: "ne" });
-        return {
+        await request.onEvent?.(eventFixture("text_delta", "text-1", "ne"));
+        return messageFixture({
           content: [{ type: "text", text: "done" }],
-          stop_reason: "end_turn",
+          stopReason: "stop",
           usage: { input_tokens: 4, output_tokens: 1 },
-        };
+        });
       } },
       emitter: {
         emit: async (request) => {
@@ -1733,7 +1734,7 @@ describe("TypeScriptAgentRuntime", () => {
     expect(outcome).toEqual(expect.objectContaining({ status: "completed", reply: "done" }));
     expect(streamAttempts).toBe(1);
     expect(finalAttempts).toBe(1);
-    expect(store.messages.at(-1)).toEqual({
+    expect(store.messages.at(-1)).toMatchObject({
       role: "assistant",
       content: [{ type: "text", text: "done" }],
     });
@@ -1776,11 +1777,11 @@ describe("TypeScriptAgentRuntime", () => {
     const runtime = new TypeScriptAgentRuntime({
       store,
       tools: new ToolRegistry(),
-      provider: { summarize, turn: async () => ({
+      provider: { summarize, turn: async () => (messageFixture({
         content: [{ type: "text", text: "done" }],
-        stop_reason: "end_turn",
+        stopReason: "stop",
         usage: { input_tokens: 1, output_tokens: 1 },
-      }) },
+      })) },
       emitter: {
         emit: async () => undefined,
         typing: async () => { throw new Error("typing unavailable"); },
@@ -1819,11 +1820,11 @@ describe("TypeScriptAgentRuntime", () => {
           providerCalls += 1;
           if (providerCalls === 1) throw new Error("maximum context length exceeded");
           retriedMessages = request.messages;
-          return {
+          return messageFixture({
             content: [{ type: "text", text: "recovered" }],
-            stop_reason: "end_turn",
+            stopReason: "stop",
             usage: { input_tokens: 10, output_tokens: 2 },
-          };
+          });
         },
       },
       emitter: { emit: async () => undefined, typing: async () => undefined },
@@ -1924,11 +1925,11 @@ describe("TypeScriptAgentRuntime", () => {
     const runtime = new TypeScriptAgentRuntime({
       store,
       tools: new ToolRegistry(),
-      provider: { summarize, turn: async () => ({
+      provider: { summarize, turn: async () => (messageFixture({
         content: [{ type: "text", text: "done" }],
-        stop_reason: "end_turn",
+        stopReason: "stop",
         usage: { input_tokens: 1, output_tokens: 1 },
-      }) },
+      })) },
       emitter: { emit: async () => undefined, typing: async () => undefined },
       systemPrompt: "test",
     });
@@ -1963,13 +1964,13 @@ describe("TypeScriptAgentRuntime", () => {
     });
     const runtime = new TypeScriptAgentRuntime({
       store, tools,
-      provider: { summarize, turn: async () => ({
+      provider: { summarize, turn: async () => (messageFixture({
         content: [
           { type: "tool_call", id: "t1", name: "first", arguments: {} },
           { type: "tool_call", id: "t2", name: "second", arguments: {} },
         ],
-        stop_reason: "tool_use", usage: { input_tokens: 1, output_tokens: 1 },
-      }) },
+        stopReason: "toolUse", usage: { input_tokens: 1, output_tokens: 1 },
+      })) },
       emitter: { emit: async () => undefined, typing: async () => undefined }, systemPrompt: "test",
     });
     await runtime.start();
@@ -2006,8 +2007,8 @@ describe("TypeScriptAgentRuntime", () => {
       provider: { summarize, turn: async () => {
         providerCalls += 1;
         return providerCalls === 1
-          ? { content: [{ type: "tool_call", id: "t1", name: "dangerous", arguments: {} }], stop_reason: "tool_use", usage: { input_tokens: 1, output_tokens: 1 } }
-          : { content: [{ type: "text", text: "已改为解释" }], stop_reason: "end_turn", usage: { input_tokens: 1, output_tokens: 1 } };
+          ? messageFixture({ content: [{ type: "tool_call", id: "t1", name: "dangerous", arguments: {} }], stopReason: "toolUse", usage: { input_tokens: 1, output_tokens: 1 } })
+          : messageFixture({ content: [{ type: "text", text: "已改为解释" }], stopReason: "stop", usage: { input_tokens: 1, output_tokens: 1 } });
       } },
       emitter: { emit: async () => undefined, typing: async () => undefined }, systemPrompt: "test",
     });
@@ -2029,10 +2030,10 @@ describe("TypeScriptAgentRuntime", () => {
     });
     const runtime = new TypeScriptAgentRuntime({
       store, tools, maxSteps: 1,
-      provider: { summarize, turn: async () => ({
+      provider: { summarize, turn: async () => (messageFixture({
         content: [{ type: "tool_call", id: "t1", name: "loop", arguments: {} }],
-        stop_reason: "tool_use", usage: { input_tokens: 1, output_tokens: 1 },
-      }) },
+        stopReason: "toolUse", usage: { input_tokens: 1, output_tokens: 1 },
+      })) },
       emitter: { emit: async () => undefined, typing: async () => undefined }, systemPrompt: "test",
     });
     await runtime.start();
@@ -2040,7 +2041,7 @@ describe("TypeScriptAgentRuntime", () => {
     expect(outcome).toEqual(expect.objectContaining({
       status: "completed", reply: "本轮已达到最大步骤，请发送下一条消息继续。",
     }));
-    expect(store.messages.at(-1)).toEqual({
+    expect(store.messages.at(-1)).toMatchObject({
       role: "assistant", content: [{ type: "text", text: "本轮已达到最大步骤，请发送下一条消息继续。" }],
     });
     await runtime.stop();
@@ -2243,17 +2244,17 @@ describe("TypeScriptAgentRuntime", () => {
             throw new RuntimeProviderError("retry", "custom", "temporary", "retry", true, 503);
           }
           if (calls === 2) {
-            return {
+            return messageFixture({
               content: [{ type: "tool_call", id: "tool-1", name: "echo", arguments: {} }],
-              stop_reason: "tool_use",
+              stopReason: "toolUse",
               usage: { input_tokens: 1, output_tokens: 1 },
-            };
+            });
           }
-          return {
+          return messageFixture({
             content: [{ type: "text", text: "done" }],
-            stop_reason: "end_turn",
+            stopReason: "stop",
             usage: { input_tokens: 1, output_tokens: 1 },
-          };
+          });
         },
       },
       wireTraceController: {
@@ -2283,4 +2284,62 @@ describe("TypeScriptAgentRuntime", () => {
     ]);
     await runtime.stop();
   });
+});
+
+test("accounts failed attempts once and isolates their streamed text from the retry", async () => {
+  const store = new MemoryStore();
+  const emitted: EmitRequest[] = [];
+  const messageIds: string[] = [];
+  let calls = 0;
+  const runtime = new TypeScriptAgentRuntime({
+    store, tools: new ToolRegistry(), systemPrompt: "test",
+    provider: { summarize, turn: async (request) => {
+      const { AssistantMessageAccumulator } = await import("../../src/messages/accumulator");
+      const a = new AssistantMessageAccumulator({ name: "test", model: "test", apiStyle: "openai_completions" }, request.onEvent);
+      messageIds.push(a.message.id);
+      const textIndex = a.startText();
+      calls++;
+      a.append(textIndex, calls === 1 ? "failed prefix" : "good answer");
+      a.usage({ input_tokens: calls === 1 ? 3 : 5, output_tokens: 2, status: "partial" });
+      if (calls === 1) {
+        const error = new RuntimeProviderError("connection reset", "test", "transport", "connection reset", true);
+        a.fail("error", error); await a.drain(); throw error;
+      }
+      a.usage({ status: "complete" });
+      const result = a.complete("stop"); await a.drain(); return result;
+    } },
+    emitter: { emit: async (value) => { emitted.push(value); }, typing: async () => undefined },
+  });
+  await runtime.start();
+  const result = await runtime.runTurn(job(), handle());
+  await runtime.stop();
+  expect(result).toMatchObject({ status: "completed", reply: "good answer", input_tokens: 8, output_tokens: 4 });
+  expect(calls).toBe(2);
+  expect(new Set(messageIds).size).toBe(2);
+  expect(store.metrics[0]).toMatchObject({ input_tokens: 8, output_tokens: 4, api_calls: 2 });
+  expect(store.messages.filter((m) => m.role === "assistant")).toHaveLength(1);
+  const terminal = emitted.filter((e) => e.emit_kind === "stream" && e.state === "final").at(-1);
+  expect(terminal?.content).toBe("good answer");
+  if (terminal?.emit_kind !== "stream") throw new Error("Missing terminal stream");
+  expect(terminal.process_parts.filter((p) => p.type === "text").map((p) => p.status)).toEqual(["error", "completed"]);
+});
+
+test("does not execute or synthesize results for truncated tool drafts", async () => {
+  const store = new MemoryStore();
+  const tools = new ToolRegistry();
+  let executions = 0;
+  tools.register({ name: "dangerous", description: "test", input_schema: { type: "object" }, execute: async () => { executions++; return { content: [] }; } });
+  const runtime = new TypeScriptAgentRuntime({
+    store, tools, systemPrompt: "test",
+    provider: { summarize, turn: async () => messageFixture({ stopReason: "length", content: [
+      { type: "text", text: "partial answer" }, { type: "tool_call", id: "call", name: "dangerous" },
+    ] }) },
+    emitter: { emit: async () => undefined, typing: async () => undefined },
+  });
+  await runtime.start();
+  const result = await runtime.runTurn(job(), handle());
+  await runtime.stop();
+  expect(result).toMatchObject({ status: "completed", reply: "partial answer" });
+  expect(executions).toBe(0);
+  expect(store.messages.some((m) => m.role === "tool")).toBe(false);
 });

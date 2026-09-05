@@ -1,3 +1,5 @@
+import type { AssistantMessage, AssistantMessageEvent } from "../messages/assistant-message";
+export type { AssistantMessage, AssistantMessageEvent } from "../messages/assistant-message";
 import type {
   AgentJob,
   DesktopStreamBatchRequest,
@@ -31,18 +33,6 @@ export interface ToolResultBlock extends JsonObject {
 
 export type RuntimeContentBlock = TextBlock | ToolCallBlock | ToolResultBlock | JsonObject;
 
-export type RuntimeStreamEvent =
-  | { type: "text_start"; part_id: string }
-  | { type: "text_delta"; part_id: string; text: string }
-  | { type: "text_end"; part_id: string }
-  | { type: "thinking_start"; part_id: string }
-  | { type: "thinking_delta"; part_id: string; thinking: string }
-  | { type: "thinking_end"; part_id: string }
-  | { type: "redacted_thinking"; part_id: string }
-  | { type: "tool_input_start"; part_id: string; tool_call_id: string; name: string }
-  | { type: "tool_input_delta"; part_id: string; delta: string }
-  | { type: "tool_input_end"; part_id: string };
-
 export type RuntimeMessageContent = string | RuntimeContentBlock[];
 
 export interface RuntimeConversationMessage {
@@ -61,19 +51,13 @@ export interface RuntimeCompactionSummaryMessage {
   };
 }
 
-export type RuntimeMessage = RuntimeConversationMessage | RuntimeCompactionSummaryMessage;
+export type RuntimeMessage = RuntimeConversationMessage | RuntimeCompactionSummaryMessage | AssistantMessage;
 
 export interface RuntimeUsage {
   input_tokens: number;
   output_tokens: number;
   cache_read_input_tokens?: number;
   cache_creation_input_tokens?: number;
-}
-
-export interface RuntimeTurnResponse {
-  content: RuntimeContentBlock[];
-  stop_reason: string;
-  usage: RuntimeUsage;
 }
 
 export interface RuntimeProviderUserIdentity {
@@ -101,12 +85,12 @@ export interface RuntimeProviderRequest {
   toolChoice: "auto" | "none";
   signal: AbortSignal;
   userIdentity?: RuntimeProviderUserIdentity;
-  onEvent?: (event: RuntimeStreamEvent) => Promise<void> | void;
+  onEvent?: (event: AssistantMessageEvent) => Promise<void> | void;
   wireTrace?: RuntimeWireTraceAttempt;
 }
 
 export interface RuntimeProvider {
-  turn(request: RuntimeProviderRequest): Promise<RuntimeTurnResponse>;
+  turn(request: RuntimeProviderRequest): Promise<AssistantMessage>;
   summarize(request: RuntimeSummaryRequest): Promise<RuntimeSummaryResult>;
 }
 

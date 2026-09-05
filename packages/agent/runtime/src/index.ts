@@ -27,3 +27,5 @@ export * from "./engine/turn-observer";
 export * from "./engine/types";
 export * from "./tooling/workspace-search";
 export * from "./workspace/instance-manager";
+
+export type * from "./messages/assistant-message";

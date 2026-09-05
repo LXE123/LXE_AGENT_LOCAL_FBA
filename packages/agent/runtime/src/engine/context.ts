@@ -208,7 +208,7 @@ export function requestContextTokenEstimate(
 const cleanBlock = (raw: unknown, role: RuntimeMessage["role"]): JsonObject | undefined => {
   const block = object(raw);
   const type = String(block.type ?? "").trim();
-  if (type === "text") return { type, text: text(block.text) };
+  if (type === "text") return { ...jsonObject(block), type, text: text(block.text) };
   if (type === "image" && role === "user") return jsonObject(block);
   if (type === "local_file" && role === "user") {
     const path = text(block.path).trim();
@@ -227,7 +227,7 @@ const cleanBlock = (raw: unknown, role: RuntimeMessage["role"]): JsonObject | un
     };
   }
   if (type === "thinking" && role === "assistant") {
-    return { type, thinking: text(block.thinking), signature: text(block.signature) };
+    return { ...jsonObject(block), type, thinking: text(block.thinking), ...(block.signature !== undefined ? { signature: text(block.signature) } : {}) };
   }
   if (type === "redacted_thinking" && role === "assistant") {
     return { type, data: text(block.data) };
@@ -235,8 +235,8 @@ const cleanBlock = (raw: unknown, role: RuntimeMessage["role"]): JsonObject | un
   if (type === "tool_call" && role === "assistant") {
     const id = text(block.id).trim();
     const name = text(block.name).trim();
-    if (!id || !name) return undefined;
-    return { type, id, name, arguments: jsonObject(block.arguments) };
+    if (!id || !name || block.arguments === undefined) return undefined;
+    return { ...jsonObject(block), type, id, name, arguments: jsonObject(block.arguments) };
   }
   if (type === "tool_result" && role === "tool") {
     const toolCallId = text(block.tool_call_id).trim();
@@ -288,7 +288,7 @@ export function cleanCanonicalMessages(messages: readonly RuntimeMessage[]): Run
       continue;
     }
     const content = raw.content.map((block) => cleanBlock(block, role)).filter((block): block is JsonObject => Boolean(block));
-    if (content.length > 0) cleaned.push({ role, content });
+    if (content.length > 0) cleaned.push({ ...raw, role, content } as RuntimeMessage);
   }
   return cleaned;
 }
@@ -464,7 +464,7 @@ export function pruneProcessedHistoryImages(messages: readonly RuntimeMessage[])
     if (message.role === "compactionSummary") return structuredClone(message) as RuntimeMessage;
     const replaced = replaceImages(message.content);
     changed ||= replaced.changed;
-    return { role: message.role, content: replaced.content };
+    return { ...message, content: replaced.content } as RuntimeMessage;
   });
   return { messages: next, changed };
 }

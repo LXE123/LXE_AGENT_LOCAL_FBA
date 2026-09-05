@@ -1,12 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { loadLlmProviderCatalog, repositoryRoot } from "@lxe/core";
-import type { RuntimeMessage, RuntimeStreamEvent } from "../../src/engine/types";
+import type { RuntimeMessage, AssistantMessageEvent } from "../../src/engine/types";
 import {
   adaptMessagesForCompletions,
   buildCompletionsRequest,
   CompletionsRuntimeProvider,
-  CompletionsStreamNormalizer,
   type CompletionsClientPort,
 } from "../../src/providers/completions-provider";
 import { createRuntimeProvider } from "../../src/providers/provider-factory";
@@ -223,78 +222,6 @@ describe("ZhipuAI Chat Completions provider", () => {
     }]);
   });
 
-  test("normalizes reasoning, text, parallel tool fragments, finish reason, and usage", () => {
-    const events: RuntimeStreamEvent[] = [];
-    const stream = new CompletionsStreamNormalizer((event) => events.push(event));
-    stream.streamEvent({ choices: [{ delta: { reasoning_content: "plan" }, finish_reason: null }] });
-    stream.streamEvent({ choices: [{ delta: { content: "checking" }, finish_reason: null }] });
-    stream.streamEvent({ choices: [{ delta: { tool_calls: [
-      { index: 0, id: "call_", function: { name: "rea", arguments: "" } },
-      { index: 1, id: "call_2", function: { name: "write", arguments: "{\"text\":\"x\"}" } },
-    ] }, finish_reason: null }] });
-    stream.streamEvent({ choices: [{ delta: { tool_calls: [
-      { index: 0, id: "1", function: { name: "d", arguments: "{\"path\":\"a.ts\"}" } },
-    ] }, finish_reason: null }] });
-    stream.streamEvent({ choices: [{ delta: {}, finish_reason: "tool_calls" }] });
-    stream.streamEvent({
-      choices: [],
-      usage: { prompt_tokens: 20, completion_tokens: 8, prompt_tokens_details: { cached_tokens: 5 } },
-    });
-    stream.finish();
-
-    expect(events.map((event) => event.type)).toEqual([
-      "thinking_start", "thinking_delta", "thinking_end",
-      "text_start", "text_delta", "text_end",
-      "tool_input_start", "tool_input_delta",
-      "tool_input_start", "tool_input_delta",
-      "tool_input_end", "tool_input_end",
-    ]);
-    expect(stream.result()).toEqual({
-      content: [
-        { type: "thinking", thinking: "plan", signature: "reasoning_content" },
-        { type: "text", text: "checking" },
-        { type: "tool_call", id: "call_1", name: "read", arguments: { path: "a.ts" } },
-        { type: "tool_call", id: "call_2", name: "write", arguments: { text: "x" } },
-      ],
-      stop_reason: "tool_use",
-      usage: {
-        input_tokens: 15,
-        output_tokens: 8,
-        cache_read_input_tokens: 5,
-        cache_creation_input_tokens: 0,
-      },
-    });
-  });
-
-  test("preserves malformed tool arguments and rejects incomplete or unknown termination", () => {
-    const malformed = new CompletionsStreamNormalizer(() => undefined);
-    malformed.streamEvent({ choices: [{ delta: { tool_calls: [{
-      index: 0, id: "call_bad", function: { name: "write", arguments: "{bad" },
-    }] }, finish_reason: null }] });
-    malformed.streamEvent({ choices: [{ delta: {}, finish_reason: "tool_calls" }] });
-    expect(malformed.result().content).toEqual([{
-      type: "tool_call",
-      id: "call_bad",
-      name: "write",
-      arguments: { __unparsed_arguments: "{bad" },
-    }]);
-
-    const incomplete = new CompletionsStreamNormalizer(() => undefined);
-    incomplete.streamEvent({ choices: [{ delta: { content: "partial" }, finish_reason: null }] });
-    incomplete.finish();
-    expect(() => incomplete.result()).toThrow("without finish_reason");
-
-    const unknown = new CompletionsStreamNormalizer(() => undefined);
-    unknown.streamEvent({ choices: [{ delta: {}, finish_reason: "content_filter" }] });
-    expect(() => unknown.result()).toThrow("Provider finish_reason: content_filter");
-
-    const streamedError = new CompletionsStreamNormalizer(() => undefined);
-    expect(() => streamedError.streamEvent({
-      error: { code: "1305", message: "model is overloaded" },
-      choices: [{ delta: { content: "must not hide the error" }, finish_reason: null }],
-    })).toThrow('{"code":"1305","message":"model is overloaded"}');
-  });
-
   test("runs normal and summary streams through the same Chat Completions wire", async () => {
     const turnBody: { body?: Record<string, unknown> } = {};
     const provider = new CompletionsRuntimeProvider(descriptor({ thinkingEffort: "high" }), fakeClient([
@@ -302,7 +229,7 @@ describe("ZhipuAI Chat Completions provider", () => {
       { choices: [{ delta: { content: "done" }, finish_reason: "stop" }] },
       { choices: [], usage: { prompt_tokens: 4, completion_tokens: 2 } },
     ], turnBody));
-    const seen: RuntimeStreamEvent[] = [];
+    const seen: AssistantMessageEvent[] = [];
     const turn = await provider.turn({
       system: "sys",
       messages: [{ role: "user", content: "hello" }],
@@ -311,12 +238,12 @@ describe("ZhipuAI Chat Completions provider", () => {
       signal: new AbortController().signal,
       onEvent: async (event) => { seen.push(event); },
     });
-    expect(turn.stop_reason).toBe("end_turn");
+    expect(turn.stopReason).toBe("stop");
     expect(turn.content).toEqual([
-      { type: "thinking", thinking: "why", signature: "reasoning_content" },
+      { type: "thinking", thinking: "why", thinkingSignature: "reasoning_content" },
       { type: "text", text: "done" },
     ]);
-    expect(seen.at(-1)?.type).toBe("text_end");
+    expect(seen.at(-1)?.type).toBe("done");
     expect(turnBody.body).toEqual(expect.objectContaining({ reasoning_effort: "high" }));
 
     const summaryBody: { body?: Record<string, unknown> } = {};
@@ -374,7 +301,7 @@ describe("ZhipuAI Chat Completions provider", () => {
         tools: [],
         toolChoice: "auto",
         signal: new AbortController().signal,
-      })).toEqual(expect.objectContaining({ stop_reason: "end_turn" }));
+      })).toEqual(expect.objectContaining({ stopReason: "stop" }));
       expect(received).toEqual(expect.objectContaining({
         authorization: "Bearer sdk-test-key",
         pathname: "/api/paas/v4/chat/completions",

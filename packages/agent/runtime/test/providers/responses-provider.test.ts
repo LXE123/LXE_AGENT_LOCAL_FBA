@@ -13,11 +13,9 @@ import {
   adaptMessagesForResponses,
   buildResponsesRequest,
   ResponsesRuntimeProvider,
-  ResponsesStreamNormalizer,
-  responsesContent,
   type ResponsesClientPort,
 } from "../../src/providers/responses-provider";
-import type { RuntimeMessage, RuntimeStreamEvent } from "../../src/engine/types";
+import type { RuntimeMessage, AssistantMessageEvent } from "../../src/engine/types";
 
 const descriptor = (patch: Partial<ProviderDescriptor> = {}): ProviderDescriptor => ({
   name: "deepseek",
@@ -66,97 +64,6 @@ const fakeClient = (events: Array<[string, unknown]>, final: unknown, captured?:
 });
 
 describe("DeepSeek Responses provider", () => {
-  test("gives one part per provider block and closes parts left open at the end", () => {
-    const events: RuntimeStreamEvent[] = [];
-    const normalizer = new ResponsesStreamNormalizer((event) => events.push(event));
-    normalizer.delta("thinking", "item_a", 0, "plan");
-    normalizer.delta("thinking", "item_a", 0, " more");
-    normalizer.done("thinking", "item_a", 0, "plan more");
-    normalizer.done("thinking", "item_a", 0, "plan more");
-    normalizer.delta("text", "item_b", 0, "answer");
-    normalizer.finish();
-
-    expect(events).toEqual([
-      { type: "thinking_start", part_id: "item_a#0" },
-      { type: "thinking_delta", part_id: "item_a#0", thinking: "plan" },
-      { type: "thinking_delta", part_id: "item_a#0", thinking: " more" },
-      { type: "thinking_end", part_id: "item_a#0" },
-      { type: "text_start", part_id: "item_b#0" },
-      { type: "text_delta", part_id: "item_b#0", text: "answer" },
-      { type: "text_end", part_id: "item_b#0" },
-    ]);
-  });
-
-  test("fills a block whose whole body only arrives with its terminal event", () => {
-    const events: RuntimeStreamEvent[] = [];
-    const normalizer = new ResponsesStreamNormalizer((event) => events.push(event));
-    normalizer.done("text", "item_c", 1, "whole answer");
-
-    expect(events).toEqual([
-      { type: "text_start", part_id: "item_c#1" },
-      { type: "text_delta", part_id: "item_c#1", text: "whole answer" },
-      { type: "text_end", part_id: "item_c#1" },
-    ]);
-  });
-
-  test("normalizes OpenRouter reasoning events that omit content_index", () => {
-    const events: RuntimeStreamEvent[] = [];
-    const normalizer = new ResponsesStreamNormalizer((event) => events.push(event));
-    normalizer.streamEvent({ type: "response.reasoning.delta", item_id: "rs_or_1", delta: "plan" });
-    normalizer.streamEvent({ type: "response.reasoning.done", item_id: "rs_or_1", reasoning: "plan" });
-
-    expect(events).toEqual([
-      { type: "thinking_start", part_id: "rs_or_1#0" },
-      { type: "thinking_delta", part_id: "rs_or_1#0", thinking: "plan" },
-      { type: "thinking_end", part_id: "rs_or_1#0" },
-    ]);
-  });
-
-  test("normalizes interleaved function arguments and deduplicates completion", () => {
-    const events: RuntimeStreamEvent[] = [];
-    const normalizer = new ResponsesStreamNormalizer((event) => events.push(event));
-    normalizer.streamEvent({
-      type: "response.output_item.added",
-      item: { type: "function_call", id: "item_1", call_id: "call_1", name: "read" },
-    });
-    normalizer.streamEvent({
-      type: "response.output_item.added",
-      item: { type: "function_call", id: "item_2", call_id: "call_2", name: "write" },
-    });
-    normalizer.streamEvent({ type: "response.function_call_arguments.delta", item_id: "item_1", delta: "{\"path\":" });
-    normalizer.streamEvent({ type: "response.function_call_arguments.delta", item_id: "item_2", delta: "{\"text\":\"x\"}" });
-    normalizer.streamEvent({ type: "response.function_call_arguments.delta", item_id: "item_1", delta: "\"a.txt\"}" });
-    normalizer.streamEvent({ type: "response.function_call_arguments.done", item_id: "item_1" });
-    normalizer.streamEvent({
-      type: "response.output_item.done",
-      item: { type: "function_call", id: "item_1", call_id: "call_1", name: "read" },
-    });
-    normalizer.finish();
-
-    expect(events).toEqual([
-      { type: "tool_input_start", part_id: "item_1", tool_call_id: "call_1", name: "read" },
-      { type: "tool_input_start", part_id: "item_2", tool_call_id: "call_2", name: "write" },
-      { type: "tool_input_delta", part_id: "item_1", delta: "{\"path\":" },
-      { type: "tool_input_delta", part_id: "item_2", delta: "{\"text\":\"x\"}" },
-      { type: "tool_input_delta", part_id: "item_1", delta: "\"a.txt\"}" },
-      { type: "tool_input_end", part_id: "item_1" },
-      { type: "tool_input_end", part_id: "item_2" },
-    ]);
-  });
-
-  test("emits a complete tool input lifecycle when no argument delta arrives", () => {
-    const events: RuntimeStreamEvent[] = [];
-    const normalizer = new ResponsesStreamNormalizer((event) => events.push(event));
-    const item = { type: "function_call", id: "item_3", call_id: "call_3", name: "list" };
-    normalizer.streamEvent({ type: "response.output_item.added", item });
-    normalizer.streamEvent({ type: "response.output_item.done", item });
-
-    expect(events).toEqual([
-      { type: "tool_input_start", part_id: "item_3", tool_call_id: "call_3", name: "list" },
-      { type: "tool_input_end", part_id: "item_3" },
-    ]);
-  });
-
   test("expands one assistant message into sibling call items and matches results by call id", () => {
     const messages: RuntimeMessage[] = [
       { role: "user", content: "hi" },
@@ -179,13 +86,12 @@ describe("DeepSeek Responses provider", () => {
       {
         type: "message",
         role: "assistant",
-        id: "msg_replay_1",
+        id: "msg_replay_1_1",
         status: "completed",
         content: [{ type: "output_text", text: "reading it", annotations: [] }],
       },
       {
         type: "function_call",
-        id: "fc_replay_1_0",
         call_id: "call_1",
         name: "read",
         arguments: JSON.stringify({ path: "a.txt" }),
@@ -348,20 +254,6 @@ describe("DeepSeek Responses provider", () => {
     expect(max.reasoning).toEqual({ effort: "max" });
   });
 
-  test("keeps tool arguments the model actually sent when they are not valid JSON", () => {
-    expect(responsesContent([
-      { type: "reasoning", content: [{ type: "reasoning_text", text: "why" }] },
-      { type: "reasoning", summary: ["first", { type: "summary_text", text: "second" }] },
-      { type: "message", content: [{ type: "output_text", text: "done" }] },
-      { type: "function_call", call_id: "call_9", name: "write", arguments: "{not json" },
-    ])).toEqual([
-      { type: "thinking", thinking: "why" },
-      { type: "thinking", thinking: "first\nsecond" },
-      { type: "text", text: "done" },
-      { type: "tool_call", id: "call_9", name: "write", arguments: { __unparsed_arguments: "{not json" } },
-    ]);
-  });
-
   test("streams events and maps the terminal payload into runtime blocks and usage", async () => {
     const captured: { body?: Record<string, unknown> } = {};
     const client = fakeClient([
@@ -379,17 +271,17 @@ describe("DeepSeek Responses provider", () => {
       ["response.output_item.done", {
         item: { type: "function_call", id: "fc_2", call_id: "call_2", name: "read", arguments: "{\"path\":\"a\"}" },
       }],
-      ["response.completed", {}],
+      ["response.completed", { response: { status: "completed" } }],
     ], {
       status: "completed",
       output: [
-        { type: "message", content: [{ type: "output_text", text: "hello" }] },
-        { type: "function_call", call_id: "call_2", name: "read", arguments: "{\"path\":\"a\"}" },
+        { type: "message", id: "msg_1", content: [{ type: "output_text", text: "hello" }] },
+        { type: "function_call", id: "fc_2", call_id: "call_2", name: "read", arguments: "{\"path\":\"a\"}" },
       ],
       usage: { input_tokens: 12, output_tokens: 5, input_tokens_details: { cached_tokens: 4 } },
     }, captured);
 
-    const seen: RuntimeStreamEvent[] = [];
+    const seen: AssistantMessageEvent[] = [];
     const deliveryOrder: string[] = [];
     const traced: string[] = [];
     const provider = new ResponsesRuntimeProvider(descriptor(), client);
@@ -419,26 +311,24 @@ describe("DeepSeek Responses provider", () => {
     expect(traced).toContain("response.completed");
 
     expect(seen.map((event) => event.type)).toEqual([
-      "thinking_start", "thinking_delta", "thinking_end",
+      "start", "thinking_start", "thinking_delta", "thinking_end",
       "text_start", "text_delta", "text_end",
-      "tool_input_start", "tool_input_delta", "tool_input_delta", "tool_input_end",
+      "toolcall_start", "toolcall_delta", "toolcall_delta", "toolcall_end", "done",
     ]);
-    expect(seen.slice(6)).toEqual([
-      { type: "tool_input_start", part_id: "fc_2", tool_call_id: "call_2", name: "read" },
-      { type: "tool_input_delta", part_id: "fc_2", delta: "{\"path\":" },
-      { type: "tool_input_delta", part_id: "fc_2", delta: "\"a\"}" },
-      { type: "tool_input_end", part_id: "fc_2" },
+    expect(seen.filter((event) => event.type === "toolcall_delta")).toMatchObject([
+      { contentIndex: 2, delta: '{"path":' }, { contentIndex: 2, delta: '"a"}' },
     ]);
     deliveryOrder.push("turn_resolved");
-    expect(deliveryOrder.at(-2)).toBe("tool_input_end");
+    expect(deliveryOrder.at(-2)).toBe("done");
     expect(deliveryOrder.at(-1)).toBe("turn_resolved");
-    expect(result.content).toEqual([
+    expect(result.content).toMatchObject([
+      { type: "thinking", thinking: "thinking" },
       { type: "text", text: "hello" },
       { type: "tool_call", id: "call_2", name: "read", arguments: { path: "a" } },
     ]);
     // A response carrying a call is not the end of the turn, and the runtime
     // decides whether to keep stepping from exactly this.
-    expect(result.stop_reason).toBe("tool_use");
+    expect(result.stopReason).toBe("toolUse");
     // This wire's `input_tokens` already contains the cached reads, and the
     // runtime sizes context by adding the fields together - so the fresh count
     // handed over must exclude them: 12 total - 4 cached = 8 fresh.
@@ -446,7 +336,7 @@ describe("DeepSeek Responses provider", () => {
       input_tokens: 8,
       output_tokens: 5,
       cache_read_input_tokens: 4,
-      cache_creation_input_tokens: 0,
+      status: "complete",
     });
     expect(captured.body?.instructions).toBe("sys");
   });
@@ -465,7 +355,7 @@ describe("DeepSeek Responses provider", () => {
       toolChoice: "auto",
       signal: new AbortController().signal,
     });
-    expect(result.stop_reason).toBe("max_output_tokens");
+    expect(result.stopReason).toBe("length");
   });
 
   test("picks the adapter from the spec's declared wire, defaulting to Anthropic Messages", () => {
@@ -535,7 +425,7 @@ describe("DeepSeek Responses provider", () => {
     const captured: { body?: Record<string, unknown> } = {};
     const provider = new ResponsesRuntimeProvider(descriptor({ thinkingEffort: "low" }), fakeClient([], {
       status: "completed",
-      output: [{ type: "message", content: [{ type: "output_text", text: "summary" }] }],
+      output: [{ type: "message", id: "msg_summary", content: [{ type: "output_text", text: "summary" }] }],
       usage: { input_tokens: 3, output_tokens: 2 },
     }, captured));
     const result = await provider.summarize({
@@ -557,7 +447,7 @@ describe("DeepSeek Responses provider", () => {
       thinkingEffort: "off",
     }), fakeClient([], {
       status: "completed",
-      output: [{ type: "message", content: [{ type: "output_text", text: "summary" }] }],
+      output: [{ type: "message", id: "msg_summary", content: [{ type: "output_text", text: "summary" }] }],
       usage: { input_tokens: 1, output_tokens: 1 },
     }, offCaptured));
     await offProvider.summarize({

@@ -102,7 +102,7 @@ export type TurnProcessPart =
       type: "thinking";
       part_id: string;
       sequence: number;
-      status: "streaming" | "completed";
+      status: "streaming" | "completed" | "error";
       text: string;
       redacted_count: number;
     }
@@ -110,7 +110,7 @@ export type TurnProcessPart =
       type: "text";
       part_id: string;
       sequence: number;
-      status: "streaming" | "completed";
+      status: "streaming" | "completed" | "error";
       presentation: "process" | "final";
       text: string;
     }

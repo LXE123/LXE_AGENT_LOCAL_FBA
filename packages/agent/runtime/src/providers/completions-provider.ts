@@ -1,3 +1,5 @@
+import { canReplayMetadata, legacyMessage, completeTool, replayReasoningDetails } from "../messages/replay";
+import { AssistantMessageAccumulator } from "../messages/accumulator";
 import OpenAI from "openai";
 import type { JsonObject } from "@lxe/protocol";
 import type {
@@ -5,10 +7,9 @@ import type {
   RuntimeMessageContent,
   RuntimeProvider,
   RuntimeProviderRequest,
-  RuntimeStreamEvent,
   RuntimeSummaryRequest,
   RuntimeSummaryResult,
-  RuntimeTurnResponse,
+  AssistantMessage,
   ToolSchema,
 } from "../engine/types";
 import { compactionSummaryProviderText } from "../engine/compaction-summary";
@@ -24,7 +25,6 @@ import {
 } from "./provider";
 import { OpenAICompletionsStreamAdapter } from "./protocols/openai-completions";
 
-export { OpenAICompletionsStreamAdapter as CompletionsStreamNormalizer } from "./protocols/openai-completions";
 
 const IMAGE_PLACEHOLDER = "[image omitted: the selected model does not support image content]";
 const OPENAI_REASONING_FIELDS = new Set(["reasoning_content", "reasoning", "reasoning_text"]);
@@ -81,6 +81,7 @@ const toolResultText = (content: unknown): string => {
 export function adaptMessagesForCompletions(
   messages: RuntimeMessage[],
   supportsVision = false,
+  descriptor?: ProviderDescriptor,
 ): JsonObject[] {
   const result: JsonObject[] = [];
   for (const message of messages) {
@@ -98,16 +99,20 @@ export function adaptMessagesForCompletions(
     }
     if (message.role === "assistant") {
       const blocks = Array.isArray(message.content)
-        ? message.content.map(record)
+        ? message.content.map(record).filter(completeTool)
         : [{ type: "text", text: text(message.content) }];
       const content = blocks.filter((block) => block.type === "text").map((block) => text(block.text)).join("");
       const assistant: Record<string, unknown> = { role: "assistant", content: content || null };
       for (const field of OPENAI_REASONING_FIELDS) {
         const reasoning = blocks
-          .filter((block) => block.type === "thinking" && text(block.signature) === field)
+          .filter((block) => block.type === "thinking" && (canReplayMetadata(message, descriptor) || legacyMessage(message)) && text(block.thinkingSignature ?? block.signature) === field)
           .map((block) => text(block.thinking))
           .join("");
         if (reasoning) assistant[field] = reasoning;
+      }
+      if (canReplayMetadata(message, descriptor)) {
+        const details = blocks.flatMap((block) => block.type === "thinking" ? replayReasoningDetails(block.thinkingSignature) ?? [] : []);
+        if (details.length) assistant.reasoning_details = details;
       }
       const calls = blocks.filter((block) => block.type === "tool_call").map((block) => ({
         id: text(block.id),
@@ -118,7 +123,7 @@ export function adaptMessagesForCompletions(
         },
       }));
       if (calls.length > 0) assistant.tool_calls = calls;
-      if (content || calls.length > 0) result.push(assistant as JsonObject);
+      if (content || calls.length > 0 || assistant.reasoning_details) result.push(assistant as JsonObject);
       continue;
     }
     if (message.role !== "tool") continue;
@@ -178,7 +183,7 @@ export function buildCompletionsRequest(
     model: descriptor.model,
     messages: [
       ...(request.system.trim() ? [{ role: "system", content: request.system.trim() }] : []),
-      ...adaptMessagesForCompletions(request.messages, descriptor.supportsVision === true),
+      ...adaptMessagesForCompletions(request.messages, descriptor.supportsVision === true, descriptor),
     ],
     max_tokens: descriptor.maxTokens,
     stream: true,
@@ -216,6 +221,7 @@ export class CompletionsRuntimeProvider implements RuntimeProvider {
     if (this.injectedClient) return this.injectedClient;
     return new OpenAI({
       apiKey: this.descriptor.apiKey,
+      maxRetries: 0,
       baseURL: this.descriptor.baseURL,
       defaultHeaders: this.descriptor.defaultHeaders,
       fetch: async (input, init) => {
@@ -227,7 +233,9 @@ export class CompletionsRuntimeProvider implements RuntimeProvider {
     }) as unknown as CompletionsClientPort;
   }
 
-  async turn(request: RuntimeProviderRequest): Promise<RuntimeTurnResponse> {
+  async turn(request: RuntimeProviderRequest): Promise<AssistantMessage> {
+    const accumulator = new AssistantMessageAccumulator(this.descriptor, request.onEvent);
+    let parseFailure: unknown;
     const watchdog = new ProviderIdleWatchdog(request.signal, this.descriptor.requestIdleTimeoutMs);
     let wireOk = false;
     let wireError = "";
@@ -235,6 +243,7 @@ export class CompletionsRuntimeProvider implements RuntimeProvider {
       try { operation(); } catch { /* Diagnostics must not affect Provider execution. */ }
     };
     try {
+      request.signal.throwIfAborted();
       const body = buildCompletionsRequest(this.descriptor, request);
       const client = this.clientFor(
         (headers) => wire(() => request.wireTrace?.requestStart(headers, body as JsonObject)),
@@ -243,12 +252,7 @@ export class CompletionsRuntimeProvider implements RuntimeProvider {
           Object.fromEntries(response.headers.entries()),
         )),
       );
-      let delivery = Promise.resolve();
-      const deliver = (event: RuntimeStreamEvent): void => {
-        if (!request.onEvent) return;
-        delivery = delivery.then(() => request.onEvent?.(event)).then(() => undefined);
-      };
-      const normalizer = new OpenAICompletionsStreamAdapter(deliver);
+      const normalizer = new OpenAICompletionsStreamAdapter(accumulator);
       const stream = await client.chat.completions.create(body, { signal: watchdog.signal });
       for await (const chunk of stream) {
         watchdog.activity();
@@ -265,23 +269,25 @@ export class CompletionsRuntimeProvider implements RuntimeProvider {
         }
       }
       normalizer.finish();
-      await delivery;
+      request.signal.throwIfAborted();
       const response = normalizer.result();
+      await accumulator.drain();
       wireOk = true;
       return response;
     } catch (error) {
-      wireError = text(error instanceof Error ? error.message : error);
-      if (request.signal.aborted) throw request.signal.reason ?? new DOMException("Aborted", "AbortError");
-      if (watchdog.timedOut()) {
-        throw new RuntimeProviderError(
-          `provider request idle timed out after ${this.descriptor.requestIdleTimeoutMs}ms`,
-          this.descriptor.name,
-          "请求超时",
-          `${this.descriptor.name} 请求超时，请稍后重试。`,
-          true,
-        );
-      }
-      throw normalizeProviderError(error, this.descriptor);
+      const failure = parseFailure ?? error;
+      const classified = request.signal.aborted
+        ? request.signal.reason ?? new DOMException("Aborted", "AbortError")
+        : watchdog.timedOut()
+          ? new RuntimeProviderError(
+              `provider request idle timed out after ${this.descriptor.requestIdleTimeoutMs}ms`,
+              this.descriptor.name, "请求超时", `${this.descriptor.name} 请求超时，请稍后重试。`, true,
+            )
+          : normalizeProviderError(failure, this.descriptor);
+      wireError = String(classified instanceof Error ? classified.message : classified);
+      accumulator.fail(request.signal.aborted ? "aborted" : "error", classified);
+      await accumulator.drain();
+      throw classified;
     } finally {
       wire(() => request.wireTrace?.end(wireOk, wireError));
       watchdog.cleanup();
@@ -299,7 +305,7 @@ export class CompletionsRuntimeProvider implements RuntimeProvider {
         model: this.descriptor.model,
         messages: [
           { role: "system", content: SUMMARY_SYSTEM_PROMPT },
-          ...adaptMessagesForCompletions(request.messages, this.descriptor.supportsVision === true),
+          ...adaptMessagesForCompletions(request.messages, this.descriptor.supportsVision === true, this.descriptor),
         ],
         max_tokens: maxOutputTokens,
         stream: true,
@@ -307,20 +313,21 @@ export class CompletionsRuntimeProvider implements RuntimeProvider {
         ...buildCompletionsThinkingPayload(this.descriptor),
       };
       const stream = await this.clientFor().chat.completions.create(body, { signal: watchdog.signal });
-      const normalizer = new OpenAICompletionsStreamAdapter(() => undefined);
+      const normalizer = new OpenAICompletionsStreamAdapter(new AssistantMessageAccumulator(this.descriptor));
       for await (const chunk of stream) {
         watchdog.activity();
         normalizer.streamEvent(chunk);
       }
       normalizer.finish();
       const response = normalizer.result();
+      const { status: _status, ...usage } = response.usage;
       return {
         text: response.content
           .filter((block) => record(block).type === "text")
           .map((block) => text(record(block).text))
           .join("")
           .trim(),
-        usage: response.usage,
+        usage,
       };
     } catch (error) {
       if (request.signal.aborted) throw request.signal.reason ?? new DOMException("Aborted", "AbortError");

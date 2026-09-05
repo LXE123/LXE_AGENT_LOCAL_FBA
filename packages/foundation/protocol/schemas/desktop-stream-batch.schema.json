@@ -61,7 +61,7 @@
             "type": { "const": "thinking" },
             "part_id": { "type": "string", "minLength": 1 },
             "sequence": { "type": "integer", "minimum": 1 },
-            "status": { "enum": ["streaming", "completed"] },
+            "status": { "enum": ["streaming", "completed", "error"] },
             "text": { "type": "string" },
             "redacted_count": { "type": "integer", "minimum": 0 }
           }
@@ -74,7 +74,7 @@
             "type": { "const": "text" },
             "part_id": { "type": "string", "minLength": 1 },
             "sequence": { "type": "integer", "minimum": 1 },
-            "status": { "enum": ["streaming", "completed"] },
+            "status": { "enum": ["streaming", "completed", "error"] },
             "presentation": { "enum": ["process", "final"] },
             "text": { "type": "string" }
           }

@@ -9,7 +9,7 @@ import type {
   TurnProcessPart,
 } from "@lxe/protocol";
 import { buildToolDisplayStep } from "../tooling/tool-display";
-import type { RuntimeStreamEvent, ToolCallBlock } from "./types";
+import type { AssistantMessageEvent, ToolCallBlock } from "./types";
 
 interface StreamSnapshot {
   content: string;
@@ -101,52 +101,71 @@ export class FinalAnswerStreamer {
     this.startedAt = this.now();
   }
 
-  async pushEvent(event: RuntimeStreamEvent): Promise<void> {
+  async pushEvent(event: AssistantMessageEvent): Promise<void> {
     if (this.terminal) return;
-    switch (event.type) {
-      case "text_start":
-        this.startPart("text", event.part_id);
-        return;
-      case "thinking_start":
-        this.startPart("thinking", event.part_id);
-        return;
-      case "text_end":
-        this.endPart("text", event.part_id);
-        return;
-      case "thinking_end":
-        this.endPart("thinking", event.part_id);
-        return;
-      case "text_delta":
-        this.appendPartText("text", event.part_id, event.text);
-        return this.pushDelta({ text: event.text });
-      case "thinking_delta":
-        this.appendPartText("thinking", event.part_id, event.thinking);
-        return this.pushDelta({ thinking: event.thinking });
-      case "redacted_thinking":
-        this.addPart({
-          type: "thinking",
-          part_id: event.part_id,
-          sequence: this.processParts.length + 1,
-          status: "completed",
-          text: "",
-          redacted_count: 1,
-        });
-        this.redactedThinkingCount += 1;
-        this.displayPhase = "thinking";
-        if (!this.content && !this.thinkingStartedAt) this.thinkingStartedAt = this.now();
-        this.scheduleDelta();
-        return;
-      case "tool_input_start":
-      case "tool_input_delta":
-      case "tool_input_end":
-        // Tool input streaming is an internal model event in v1. The terminal
-        // ToolCallBlock remains authoritative for display and execution.
-        return;
-      default: {
-        const exhaustive: never = event;
-        return exhaustive;
-      }
+    if (event.type === "start") {
+      await this.startWaitingModel();
+      this.content = "";
+      return;
     }
+    if (event.type === "error") {
+      for (const id of this.generationPartIds) {
+        const part = this.processPart(id);
+        if (part && part.type !== "tool") {
+          part.status = "error";
+          this.queuePartUpdated(part);
+        }
+      }
+      this.activeTextPartId = "";
+      this.activeThinkingPartId = "";
+      this.scheduleDelta();
+      return;
+    }
+    if (event.type === "done") {
+      for (const [index, block] of event.message.content.entries()) {
+        if (block.type === "text" || block.type === "thinking") {
+          this.reconcilePart(block.type, `${event.message.id}:${index}`, block.type === "text" ? block.text : block.thinking);
+        }
+      }
+      return;
+    }
+    const id = `${event.partial.id}:${event.contentIndex}`;
+    switch (event.type) {
+      case "text_start": this.startPart("text", id); return;
+      case "thinking_start": {
+        this.startPart("thinking", id);
+        if (event.partial.content[event.contentIndex]?.redacted === true) {
+          const part = this.processPart(id);
+          if (part?.type === "thinking" && !part.redacted_count) {
+            part.redacted_count = 1;
+            this.redactedThinkingCount += 1;
+            this.queuePartUpdated(part);
+          }
+        }
+        return;
+      }
+      case "text_delta":
+        this.appendPartText("text", id, event.delta);
+        return this.pushDelta({ text: event.delta });
+      case "thinking_delta":
+        this.appendPartText("thinking", id, event.delta);
+        return this.pushDelta({ thinking: event.delta });
+      case "text_end": this.reconcilePart("text", id, event.content); return;
+      case "thinking_end": this.reconcilePart("thinking", id, event.content); return;
+      case "toolcall_start": case "toolcall_delta": case "toolcall_end": return;
+    }
+  }
+
+  private reconcilePart(kind: "text" | "thinking", id: string, full: string): void {
+    this.startPart(kind, id);
+    const part = this.processPart(id);
+    if (!part || part.type !== kind) return;
+    part.text = full;
+    this.endPart(kind, id);
+    this.content = this.generationPartIds.map((key) => this.processPart(key))
+      .filter((p) => p?.type === "text").map((p) => p && "text" in p ? p.text : "").join("");
+    this.thinking = this.processParts.filter((p) => p.type === "thinking")
+      .map((p) => p.type === "thinking" ? p.text : "").join("");
   }
 
   updateUsage(usage: {

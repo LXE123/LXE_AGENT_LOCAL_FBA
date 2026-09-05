@@ -1,3 +1,4 @@
+import { messageFixture, eventFixture } from "../message-fixtures";
 import { describe, expect, test } from "bun:test";
 import type { DesktopStreamBatchRequest, EmitRequest } from "@lxe/protocol";
 import { FinalAnswerStreamer } from "../../src/engine/final-answer-streamer";
@@ -19,7 +20,7 @@ describe("FinalAnswerStreamer display contract", () => {
     });
 
     for (let index = 0; index < 10_000; index += 1) {
-      await streamer.pushEvent({ type: "text_delta", part_id: "text-1", text: "x" });
+      await streamer.pushEvent(eventFixture("text_delta", "text-1", "x"));
     }
     expect(batches).toHaveLength(0);
     release?.();
@@ -28,7 +29,7 @@ describe("FinalAnswerStreamer display contract", () => {
     expect(batches).toHaveLength(1);
     expect(batches[0]?.mutations.filter((mutation) => mutation.kind === "part_delta")).toEqual([{
       kind: "part_delta",
-      part_id: "text-1",
+      part_id: "text-1:0",
       field: "text",
       delta: "x".repeat(10_000),
     }]);
@@ -113,10 +114,10 @@ describe("FinalAnswerStreamer display contract", () => {
       emit: async (request) => { emitted.push(request); return true; },
     });
 
-    await streamer.pushEvent({ type: "thinking_delta", part_id: "thinking-1", thinking: "checking" });
-    await streamer.pushEvent({ type: "redacted_thinking", part_id: "redacted-1" });
+    await streamer.pushEvent(eventFixture("thinking_delta", "thinking-1", "checking"));
+    await streamer.pushEvent(eventFixture("thinking_start", "redacted-1", "", true));
     clock += 3_200;
-    await streamer.pushEvent({ type: "text_delta", part_id: "text-1", text: "done" });
+    await streamer.pushEvent(eventFixture("text_delta", "text-1", "done"));
     streamer.updateUsage({
       input_tokens: 100,
       output_tokens: 20,
@@ -205,10 +206,10 @@ describe("FinalAnswerStreamer display contract", () => {
     await streamer.startWaitingModel();
     await flush();
     expect(emitted.at(-1)?.display_metrics?.phase).toBe("waiting_model");
-    await streamer.pushEvent({ type: "thinking_delta", part_id: "thinking-1", thinking: "checking" });
+    await streamer.pushEvent(eventFixture("thinking_delta", "thinking-1", "checking"));
     await flush();
     expect(emitted.at(-1)?.display_metrics?.phase).toBe("thinking");
-    await streamer.pushEvent({ type: "text_delta", part_id: "text-1", text: "answer" });
+    await streamer.pushEvent(eventFixture("text_delta", "text-1", "answer"));
     await flush();
     expect(emitted.at(-1)?.display_metrics?.phase).toBe("generating_answer");
     await streamer.pushToolStart({ type: "tool_call", id: "tool-1", name: "read", arguments: {} });
@@ -230,28 +231,28 @@ describe("FinalAnswerStreamer display contract", () => {
     const secondTool = { type: "tool_call" as const, id: "tool-2", name: "exec", arguments: { command: "bun test" } };
 
     await streamer.startWaitingModel();
-    await streamer.pushEvent({ type: "thinking_start", part_id: "thinking-1" });
-    await streamer.pushEvent({ type: "thinking_delta", part_id: "thinking-1", thinking: "inspect" });
-    await streamer.pushEvent({ type: "thinking_end", part_id: "thinking-1" });
+    await streamer.pushEvent(eventFixture("thinking_start", "thinking-1", ""));
+    await streamer.pushEvent(eventFixture("thinking_delta", "thinking-1", "inspect"));
+    await streamer.pushEvent(eventFixture("thinking_end", "thinking-1", ""));
     streamer.completeModelResponse("", false);
     await streamer.pushToolStart(firstTool);
     await streamer.pushToolFinish(firstTool, "success", 10, { result: "read ok" });
 
     await streamer.startWaitingModel();
-    await streamer.pushEvent({ type: "text_start", part_id: "narration-1" });
-    await streamer.pushEvent({ type: "text_delta", part_id: "narration-1", text: "run tests" });
-    await streamer.pushEvent({ type: "text_end", part_id: "narration-1" });
+    await streamer.pushEvent(eventFixture("text_start", "narration-1", ""));
+    await streamer.pushEvent(eventFixture("text_delta", "narration-1", "run tests"));
+    await streamer.pushEvent(eventFixture("text_end", "narration-1", ""));
     streamer.completeModelResponse("run tests", false);
     await streamer.pushToolStart(secondTool);
     await streamer.pushToolFinish(secondTool, "error", 20, { error: "test failed" });
 
     await streamer.startWaitingModel();
-    await streamer.pushEvent({ type: "thinking_start", part_id: "thinking-2" });
-    await streamer.pushEvent({ type: "thinking_delta", part_id: "thinking-2", thinking: "summarize" });
-    await streamer.pushEvent({ type: "thinking_end", part_id: "thinking-2" });
-    await streamer.pushEvent({ type: "text_start", part_id: "answer-1" });
-    await streamer.pushEvent({ type: "text_delta", part_id: "answer-1", text: "finished" });
-    await streamer.pushEvent({ type: "text_end", part_id: "answer-1" });
+    await streamer.pushEvent(eventFixture("thinking_start", "thinking-2", ""));
+    await streamer.pushEvent(eventFixture("thinking_delta", "thinking-2", "summarize"));
+    await streamer.pushEvent(eventFixture("thinking_end", "thinking-2", ""));
+    await streamer.pushEvent(eventFixture("text_start", "answer-1", ""));
+    await streamer.pushEvent(eventFixture("text_delta", "answer-1", "finished"));
+    await streamer.pushEvent(eventFixture("text_end", "answer-1", ""));
     streamer.completeModelResponse("finished", true);
     expect(await streamer.finish("finished")).toBe(true);
 
@@ -261,7 +262,7 @@ describe("FinalAnswerStreamer display contract", () => {
       "thinking", "tool", "text", "tool", "thinking", "text",
     ]);
     expect(terminal.process_parts.map((part) => part.sequence)).toEqual([1, 2, 3, 4, 5, 6]);
-    expect(terminal.process_parts[0]).toEqual(expect.objectContaining({ part_id: "thinking-1", text: "inspect" }));
+    expect(terminal.process_parts[0]).toEqual(expect.objectContaining({ part_id: "thinking-1:0", text: "inspect" }));
     expect(terminal.process_parts[1]).toEqual(expect.objectContaining({
       type: "tool",
       tool_step: expect.objectContaining({ id: "tool-1", status: "success" }),
@@ -300,7 +301,7 @@ describe("FinalAnswerStreamer display contract", () => {
         return request.state !== "final";
       },
     });
-    await streamer.pushEvent({ type: "text_delta", part_id: "text-1", text: "partial" });
+    await streamer.pushEvent(eventFixture("text_delta", "text-1", "partial"));
     expect(await streamer.finish("complete")).toBe(false);
     expect(emitted.some((frame) => frame.state === "delta")).toBe(true);
     expect(emitted.at(-1)?.state).toBe("final");
@@ -316,14 +317,10 @@ describe("FinalAnswerStreamer display contract", () => {
       emit: async (request) => { emitted.push(request); return true; },
     });
 
-    await streamer.pushEvent({
-      type: "tool_input_start",
-      part_id: "item-1",
-      tool_call_id: "call-1",
-      name: "read",
-    });
-    await streamer.pushEvent({ type: "tool_input_delta", part_id: "item-1", delta: "{\"path\":\"a\"}" });
-    await streamer.pushEvent({ type: "tool_input_end", part_id: "item-1" });
+    await streamer.pushEvent(eventFixture("toolcall_start", "call-1"));
+    await streamer.pushEvent(eventFixture("toolcall_delta", "call-1", '{"path":"a"}'));
+    await streamer.pushEvent({ type: "toolcall_end", contentIndex: 0, partial: messageFixture(),
+      toolCall: { type: "tool_call", id: "call-1", name: "read", arguments: { path: "a" } } });
     await streamer.finish("");
 
     expect(emitted.at(-1)?.process_parts).toEqual([]);

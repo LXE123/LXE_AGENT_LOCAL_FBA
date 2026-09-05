@@ -30,10 +30,11 @@ const normalizeLegacyBlock = (value: unknown): JsonObject | undefined => {
   }
   if (type === "tool_call") {
     return {
+      ...block,
       type: "tool_call",
       id: text(block.id),
       name: text(block.name),
-      arguments: object(block.arguments),
+      ...(block.arguments === undefined ? {} : { arguments: object(block.arguments) }),
     };
   }
   if (type === "tool_result") {
@@ -69,7 +70,14 @@ export const normalizeTranscriptMessage = (value: unknown): RuntimeMessage | und
   if (role === "user" && content.length > 0 && content.every((block) => block.type === "tool_result")) {
     role = "tool";
   }
-  return { role, content };
+  const metadata: Record<string, unknown> = {};
+  if (role === "assistant") {
+    const source = value as Record<string, unknown>;
+    for (const key of ["id", "timestamp", "api", "provider", "model", "responseId", "responseModel", "usage", "stopReason", "rawStopReason", "error"]) {
+      if (source[key] !== undefined) metadata[key] = source[key];
+    }
+  }
+  return { ...metadata, role, content } as RuntimeMessage;
 };
 
 export const normalizeTranscriptMessages = (values: unknown[]): RuntimeMessage[] =>

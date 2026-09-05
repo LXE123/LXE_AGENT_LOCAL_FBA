@@ -1,3 +1,4 @@
+import { messageFixture } from "../message-fixtures";
 import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { arch, platform, release, tmpdir } from "node:os";
@@ -15,92 +16,14 @@ import {
   loadProviderDescriptor,
   normalizeThinkingEffort,
   normalizeProviderError,
-  ProviderStreamNormalizer,
   ProviderIdleWatchdog,
   SUMMARY_SYSTEM_PROMPT,
   type ProviderMessage,
 } from "../../src/providers/provider";
 import { providerErrorStatusCode } from "../../src/providers/provider-errors";
-import type { RuntimeContentBlock, RuntimeMessage, RuntimeStreamEvent } from "../../src/engine/types";
+import type { RuntimeContentBlock, RuntimeMessage, AssistantMessageEvent } from "../../src/engine/types";
 
 describe("Anthropic-compatible provider", () => {
-  test("normalizes Anthropic text, thinking, tool input, and redacted blocks", () => {
-    const events: RuntimeStreamEvent[] = [];
-    let nextId = 0;
-    const normalizer = new ProviderStreamNormalizer(
-      (event) => events.push(event),
-      () => `part-${++nextId}`,
-    );
-    normalizer.streamEvent({
-      type: "content_block_start",
-      index: 0,
-      content_block: { type: "thinking", thinking: "plan" },
-    });
-    normalizer.streamEvent({
-      type: "content_block_delta",
-      index: 0,
-      delta: { type: "thinking_delta", thinking: " more" },
-    });
-    normalizer.streamEvent({ type: "content_block_stop", index: 0 });
-    normalizer.streamEvent({ type: "content_block_start", index: 1, content_block: { type: "text", text: "" } });
-    normalizer.streamEvent({ type: "content_block_delta", index: 1, delta: { type: "text_delta", text: "answer" } });
-    normalizer.streamEvent({ type: "content_block_stop", index: 1 });
-    normalizer.streamEvent({
-      type: "content_block_start",
-      index: 2,
-      content_block: { type: "tool_use", id: "call-1", name: "read", input: {} },
-    });
-    normalizer.streamEvent({
-      type: "content_block_delta",
-      index: 2,
-      delta: { type: "input_json_delta", partial_json: "{\"path\":" },
-    });
-    normalizer.streamEvent({
-      type: "content_block_delta",
-      index: 2,
-      delta: { type: "input_json_delta", partial_json: "\"a.txt\"}" },
-    });
-    normalizer.streamEvent({ type: "content_block_stop", index: 2 });
-    normalizer.streamEvent({
-      type: "content_block_start",
-      index: 3,
-      content_block: { type: "redacted_thinking", data: "encrypted-secret" },
-    });
-    normalizer.finish();
-
-    expect(events).toEqual([
-      { type: "thinking_start", part_id: "part-1" },
-      { type: "thinking_delta", part_id: "part-1", thinking: "plan" },
-      { type: "thinking_delta", part_id: "part-1", thinking: " more" },
-      { type: "thinking_end", part_id: "part-1" },
-      { type: "text_start", part_id: "part-2" },
-      { type: "text_delta", part_id: "part-2", text: "answer" },
-      { type: "text_end", part_id: "part-2" },
-      { type: "tool_input_start", part_id: "call-1", tool_call_id: "call-1", name: "read" },
-      { type: "tool_input_delta", part_id: "call-1", delta: "{\"path\":" },
-      { type: "tool_input_delta", part_id: "call-1", delta: "\"a.txt\"}" },
-      { type: "tool_input_end", part_id: "call-1" },
-      { type: "redacted_thinking", part_id: "part-3" },
-    ]);
-    expect(JSON.stringify(events)).not.toContain("encrypted-secret");
-  });
-
-  test("closes an Anthropic tool input with no deltas when the stream finishes", () => {
-    const events: RuntimeStreamEvent[] = [];
-    const normalizer = new ProviderStreamNormalizer((event) => events.push(event));
-    normalizer.streamEvent({
-      type: "content_block_start",
-      index: 0,
-      content_block: { type: "tool_use", id: "call-empty", name: "list", input: {} },
-    });
-    normalizer.finish();
-
-    expect(events).toEqual([
-      { type: "tool_input_start", part_id: "call-empty", tool_call_id: "call-empty", name: "list" },
-      { type: "tool_input_end", part_id: "call-empty" },
-    ]);
-  });
-
   test("loads the existing provider catalog and auth profile without changing env names", () => {
     const projectRoot = repositoryRoot(import.meta.dir);
     const descriptor = loadProviderDescriptor(projectRoot, {
@@ -593,7 +516,7 @@ Do NOT continue the conversation. Do NOT respond to any questions in the convers
           end: (ok, error) => wireCalls.push({ kind: "request_end", payload: { ok, error } }),
         },
       });
-      expect(result.stop_reason).toBe("end_turn");
+      expect(result.stopReason).toBe("stop");
 
       const start = wireCalls.find((call) => call.kind === "request_start")?.payload as
         { headers: Record<string, string> } | undefined;
@@ -708,33 +631,23 @@ Do NOT continue the conversation. Do NOT respond to any questions in the convers
       thinking: { type: "enabled" },
       output_config: { effort: "max" },
     }));
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       content: [
-        { type: "thinking", thinking: "reason", signature: "signed-reason" },
-        { type: "redacted_thinking", data: "encrypted-secret" },
+        { type: "thinking", thinking: "reason", thinkingSignature: "signed-reason" },
+        { type: "thinking", redacted: true, thinkingSignature: "encrypted-secret" },
         { type: "text", text: "done" },
         { type: "tool_call", id: "t1", name: "echo", arguments: { text: "hi" } },
-      ],
-      stop_reason: "tool_use",
-      usage: { input_tokens: 3, output_tokens: 4, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+      ], stopReason: "toolUse", usage: { input_tokens: 3, output_tokens: 4, status: "complete" },
     });
     expect(deltas.map((event) => (event as { type: string }).type)).toEqual([
-      "thinking_start", "thinking_delta", "thinking_end", "redacted_thinking", "text_start", "text_delta",
-      "text_end", "tool_input_start", "tool_input_delta", "tool_input_delta", "tool_input_end",
+      "start", "thinking_start", "thinking_delta", "thinking_end", "thinking_start", "thinking_end", "text_start", "text_delta",
+      "text_end", "toolcall_start", "toolcall_delta", "toolcall_delta", "toolcall_end", "done",
     ]);
-    const thinkingId = (deltas[0] as { part_id: string }).part_id;
-    const textId = (deltas[4] as { part_id: string }).part_id;
-    expect(deltas[1]).toEqual({ type: "thinking_delta", part_id: thinkingId, thinking: "reason" });
-    expect(deltas[2]).toEqual({ type: "thinking_end", part_id: thinkingId });
-    expect(deltas[5]).toEqual({ type: "text_delta", part_id: textId, text: "done" });
-    expect(deltas[6]).toEqual({ type: "text_end", part_id: textId });
-    expect(deltas.slice(7)).toEqual([
-      { type: "tool_input_start", part_id: "t1", tool_call_id: "t1", name: "echo" },
-      { type: "tool_input_delta", part_id: "t1", delta: "{\"text\":" },
-      { type: "tool_input_delta", part_id: "t1", delta: "\"hi\"}" },
-      { type: "tool_input_end", part_id: "t1" },
-    ]);
-    expect(JSON.stringify(deltas)).not.toContain("encrypted-secret");
+    expect(deltas.filter((event) => (event as { type: string }).type === "text_delta"))
+      .toMatchObject([{ type: "text_delta", contentIndex: 2, delta: "done" }]);
+
+    expect(deltas.filter((event) => (event as { type: string }).type === "toolcall_delta"))
+      .toMatchObject([{ contentIndex: 3, delta: '{"text":' }, { contentIndex: 3, delta: '"hi"}' }]);
     expect(wireCalls.filter((call) => call.kind === "wire_event")).toHaveLength(13);
     // An injected client never reaches the fetch boundary, so this turn sends no
     // HTTP request and there are no request headers to record. Recording a
@@ -765,7 +678,7 @@ Do NOT continue the conversation. Do NOT respond to any questions in the convers
     expect(captured).not.toHaveProperty("tools");
     expect(summary).toEqual({
       text: "done",
-      usage: { input_tokens: 3, output_tokens: 4, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
+      usage: { input_tokens: 3, output_tokens: 4 },
     });
   });
 
@@ -1031,7 +944,7 @@ Do NOT continue the conversation. Do NOT respond to any questions in the convers
     const listeners = new Map<string, (...args: unknown[]) => void>();
     const fixture = providerCases.stream;
     const parseErrors: unknown[] = [];
-    const runtimeEvents: RuntimeStreamEvent[] = [];
+    const runtimeEvents: AssistantMessageEvent[] = [];
     const provider = new AnthropicRuntimeProvider(
       {
         name: "kimi_coding", model: "fixture", baseURL: "https://example.invalid", apiKey: "secret",
@@ -1075,31 +988,16 @@ Do NOT continue the conversation. Do NOT respond to any questions in the convers
       },
     });
 
-    expect(runtimeEvents.map((event) => event.type)).toEqual(
-      fixture.expected_runtime_event_types as RuntimeStreamEvent["type"][],
-    );
-    const thinkingId = String(runtimeEvents[0]?.part_id ?? "");
-    const textId = String(runtimeEvents[4]?.part_id ?? "");
-    expect(thinkingId).not.toBe("");
-    expect(textId).not.toBe("");
-    expect(runtimeEvents.filter((event) => event.type === "thinking_delta"))
-      .toEqual([
-        { type: "thinking_delta", part_id: thinkingId, thinking: "plan" },
-        { type: "thinking_delta", part_id: thinkingId, thinking: " more" },
-      ]);
-    expect(runtimeEvents.filter((event) => event.type === "text_delta"))
-      .toEqual([
-        { type: "text_delta", part_id: textId, text: "Hello" },
-        { type: "text_delta", part_id: textId, text: " world" },
-      ]);
-    expect(runtimeEvents.filter((event) => event.type === "redacted_thinking")).toHaveLength(1);
-    expect(JSON.stringify(runtimeEvents)).not.toContain("fixture-encrypted-thinking");
+    expect(runtimeEvents[0]?.type).toBe("start");
+    expect(runtimeEvents.at(-1)).toEqual({ type: "done", reason: "toolUse", message: response });
+    expect(runtimeEvents.filter((event) => event.type === "thinking_delta").map((event) => "delta" in event ? event.delta : ""))
+      .toEqual(["plan", " more"]);
+    expect(runtimeEvents.filter((event) => event.type === "text_delta").map((event) => "delta" in event ? event.delta : ""))
+      .toEqual(["Hello", " world"]);
+    expect(response.content.filter((block) => block.type === "thinking" && block.redacted)).toHaveLength(1);
     expect(parseErrors).toEqual([]);
-    expect(response).toEqual({
-      content: fixture.expected_runtime_content as RuntimeContentBlock[],
-      stop_reason: "tool_use",
-      usage: { input_tokens: 3, output_tokens: 7, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
-    });
+    expect(response).toMatchObject({ stopReason: "toolUse", usage: { input_tokens: 3, output_tokens: 7, status: "complete" } });
+
   });
 
   test("closes wire attempts on transport failure without letting diagnostics replace the Provider error", async () => {
@@ -1179,7 +1077,7 @@ Do NOT continue the conversation. Do NOT respond to any questions in the convers
     expect(result.content).toEqual([{ type: "text", text: "done" }]);
   });
 
-  test("isolates stream event conversion failures as wire parse errors", async () => {
+  test("fails requests on stream conversion errors while retaining wire diagnostics", async () => {
     const listeners = new Map<string, (...args: unknown[]) => void>();
     const parseErrors: Array<{ event: string; error: unknown }> = [];
     const provider = new AnthropicRuntimeProvider(
@@ -1207,7 +1105,7 @@ Do NOT continue the conversation. Do NOT respond to any questions in the convers
         return stream;
       } } },
     );
-    const result = await provider.turn({
+    await expect(provider.turn({
       system: "system", messages: [{ role: "user", content: "hello" }], tools: [], toolChoice: "none",
       signal: new AbortController().signal,
       wireTrace: {
@@ -1217,9 +1115,7 @@ Do NOT continue the conversation. Do NOT respond to any questions in the convers
         parseError: (event, _data, error) => { parseErrors.push({ event, error }); },
         end: () => undefined,
       },
-    });
-
-    expect(result.content).toEqual([{ type: "text", text: "done" }]);
+    })).rejects.toThrow("malformed block");
     expect(parseErrors).toHaveLength(1);
     expect(parseErrors[0]?.event).toBe("content_block_start");
     expect(String(parseErrors[0]?.error)).toContain("malformed block");
@@ -1239,7 +1135,7 @@ Do NOT continue the conversation. Do NOT respond to any questions in the convers
       created.push(`${descriptor.name}/${descriptor.model}`);
       return {
         summarize: async () => ({ text: "summary", usage: { input_tokens: 0, output_tokens: 0 } }),
-        turn: async () => ({ content: [], stop_reason: "end_turn", usage: { input_tokens: 0, output_tokens: 0 } }),
+        turn: async () => messageFixture(),
       };
     });
     const first = manager.acquire();
@@ -1287,7 +1183,7 @@ Do NOT continue the conversation. Do NOT respond to any questions in the convers
         summarize: async () => ({ text: "", usage: { input_tokens: 0, output_tokens: 0 } }),
         turn: async () => {
           used.push(`${descriptor.name}/${descriptor.model}/${descriptor.apiKey}`);
-          return { content: [], stop_reason: "end_turn", usage: { input_tokens: 0, output_tokens: 0 } };
+          return messageFixture();
         },
       }),
     );
@@ -1330,7 +1226,7 @@ Do NOT continue the conversation. Do NOT respond to any questions in the convers
         observedKeys.push(descriptor.apiKey);
         return {
           summarize: async () => ({ text: "summary", usage: { input_tokens: 0, output_tokens: 0 } }),
-          turn: async () => ({ content: [], stop_reason: "end_turn", usage: { input_tokens: 0, output_tokens: 0 } }),
+          turn: async () => messageFixture(),
         };
       },
       undefined,

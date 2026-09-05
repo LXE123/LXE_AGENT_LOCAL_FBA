@@ -165,7 +165,7 @@ const persistedMessage = (message: RuntimeMessage): RuntimeMessage => {
       // Attached images remain durable through their local_file reference;
       // their transient visual block is only for the current provider call.
       content: message.content.filter((block) => text(block.type) !== "image"),
-    }) as unknown as RuntimeMessage;
+    } as unknown as JsonObject) as unknown as RuntimeMessage;
   }
   return sanitizePersistedValue(message as unknown as JsonObject) as unknown as RuntimeMessage;
 };

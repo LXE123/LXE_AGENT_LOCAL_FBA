@@ -1,3 +1,5 @@
+import { canReplayMetadata, legacyMessage, completeTool } from "../messages/replay";
+import { AssistantMessageAccumulator } from "../messages/accumulator";
 import { readFileSync } from "node:fs";
 import { arch, platform, release } from "node:os";
 import { createHash } from "node:crypto";
@@ -22,8 +24,7 @@ import type {
   RuntimeProviderUserIdentity,
   RuntimeSummaryRequest,
   RuntimeSummaryResult,
-  RuntimeStreamEvent,
-  RuntimeTurnResponse,
+  AssistantMessage,
 } from "../engine/types";
 import { compactionSummaryProviderText } from "../engine/compaction-summary";
 import { runtimeConfigPaths, runtimeConfigPathsFromRoot } from "./config-paths";
@@ -31,7 +32,7 @@ import { classifyProviderError, RuntimeProviderError } from "./provider-errors";
 import { readProviderPreference } from "./provider-preferences";
 import { AnthropicMessagesStreamAdapter } from "./protocols/anthropic-messages";
 export { RuntimeProviderError } from "./provider-errors";
-export { AnthropicMessagesStreamAdapter as ProviderStreamNormalizer } from "./protocols/anthropic-messages";
+
 export {
   PROVIDER_API_STYLE_ANTHROPIC_MESSAGES,
   PROVIDER_API_STYLE_OPENAI_COMPLETIONS,
@@ -410,6 +411,8 @@ export function adaptMessagesForProvider(messages: RuntimeMessage[], descriptor:
         : [{ type: "text", text: String(message.content ?? "") }];
       const content = source.map((raw): JsonObject | undefined => {
         const block = errorObject(raw);
+        if (!completeTool(block)) return undefined;
+        const replay = canReplayMetadata(message, descriptor);
         if (block.type === "tool_call") {
           return {
             type: "tool_use",
@@ -419,11 +422,16 @@ export function adaptMessagesForProvider(messages: RuntimeMessage[], descriptor:
           };
         }
         if (block.type === "thinking") {
-          if (OPENAI_REASONING_SIGNATURES.has(String(block.signature ?? ""))) return undefined;
+          if (OPENAI_REASONING_SIGNATURES.has(String(block.signature ?? block.thinkingSignature ?? ""))) return undefined;
+          if (!replay && !legacyMessage(message)) return undefined;
+          if (block.redacted === true) {
+            if (deepseek) return { type: "text", text: DEEPSEEK_REDACTED_THINKING_PLACEHOLDER };
+            return replay ? { type: "redacted_thinking", data: String(block.thinkingSignature ?? "") } : undefined;
+          }
           return {
             type: "thinking",
             thinking: String(block.thinking ?? ""),
-            ...(deepseek ? {} : { signature: String(block.signature ?? "") }),
+            ...(deepseek ? {} : { signature: String(block.thinkingSignature ?? block.signature ?? "") }),
           };
         }
         if (block.type === "redacted_thinking" && deepseek) {
@@ -602,39 +610,6 @@ const rawEventText = (value: unknown): string => {
   }
 };
 
-const runtimeBlock = (block: Record<string, unknown>): RuntimeContentBlock | undefined => {
-  if (block.type === "text") return { type: "text", text: String(block.text ?? "") };
-  if (block.type === "tool_use") {
-    const input = block.input !== null && typeof block.input === "object" && !Array.isArray(block.input)
-      ? block.input as JsonObject
-      : {};
-    return {
-      type: "tool_call",
-      id: String(block.id ?? ""),
-      name: String(block.name ?? ""),
-      arguments: input,
-    };
-  }
-  if (block.type === "thinking") {
-    return {
-      type: "thinking",
-      thinking: String(block.thinking ?? ""),
-      signature: String(block.signature ?? ""),
-    };
-  }
-  if (block.type === "redacted_thinking") {
-    return { type: "redacted_thinking", data: String(block.data ?? "") };
-  }
-  return undefined;
-};
-
-const runtimeUsage = (usage: AnthropicMessageLike["usage"]): RuntimeSummaryResult["usage"] => ({
-  input_tokens: Math.max(0, Math.trunc(usage.input_tokens ?? 0)),
-  output_tokens: Math.max(0, Math.trunc(usage.output_tokens ?? 0)),
-  cache_read_input_tokens: Math.max(0, Math.trunc(usage.cache_read_input_tokens ?? 0)),
-  cache_creation_input_tokens: Math.max(0, Math.trunc(usage.cache_creation_input_tokens ?? 0)),
-});
-
 export class ProviderIdleWatchdog {
   private readonly controller = new AbortController();
   private readonly timeoutMs: number;
@@ -657,6 +632,7 @@ export class ProviderIdleWatchdog {
 
   get signal(): AbortSignal { return this.controller.signal; }
   timedOut(): boolean { return this.timeoutReached; }
+  abort(reason: unknown): void { this.controller.abort(reason); }
 
   activity(): void {
     if (this.closed || this.controller.signal.aborted) return;
@@ -711,8 +687,15 @@ class CredentialResolvingRuntimeProvider implements RuntimeProvider {
     }
   }
 
-  async turn(request: RuntimeProviderRequest): Promise<RuntimeTurnResponse> {
-    return await this.prepared().turn(request);
+  async turn(request: RuntimeProviderRequest): Promise<AssistantMessage> {
+    let provider: RuntimeProvider;
+    try { provider = this.prepared(); } catch (error) {
+      const accumulator = new AssistantMessageAccumulator(this.definition(), request.onEvent);
+      accumulator.fail(request.signal.aborted ? "aborted" : "error", error);
+      await accumulator.drain();
+      throw error;
+    }
+    return await provider.turn(request);
   }
 
   async summarize(request: RuntimeSummaryRequest): Promise<RuntimeSummaryResult> {
@@ -813,6 +796,7 @@ export class AnthropicRuntimeProvider implements RuntimeProvider {
     if (this.injectedClient) return this.injectedClient;
     return new Anthropic({
       apiKey: this.descriptor.apiKey,
+      maxRetries: 0,
       baseURL: this.descriptor.baseURL,
       defaultHeaders: this.descriptor.defaultHeaders,
       fetch: (input, init) => {
@@ -822,7 +806,9 @@ export class AnthropicRuntimeProvider implements RuntimeProvider {
     }) as unknown as AnthropicClientPort;
   }
 
-  async turn(request: RuntimeProviderRequest): Promise<RuntimeTurnResponse> {
+  async turn(request: RuntimeProviderRequest): Promise<AssistantMessage> {
+    const accumulator = new AssistantMessageAccumulator(this.descriptor, request.onEvent);
+    let parseFailure: unknown;
     const watchdog = new ProviderIdleWatchdog(request.signal, this.descriptor.requestIdleTimeoutMs);
     let wireOk = false;
     let wireError = "";
@@ -830,16 +816,12 @@ export class AnthropicRuntimeProvider implements RuntimeProvider {
       try { operation(); } catch { /* Diagnostics must not affect Provider execution. */ }
     };
     try {
+      request.signal.throwIfAborted();
       const parameters = buildProviderRequest(this.descriptor, request);
       const client = this.clientFor((headers) => {
         wire(() => request.wireTrace?.requestStart(headers, parameters as unknown as JsonObject));
       });
-      let delivery = Promise.resolve();
-      const deliver = (event: RuntimeStreamEvent): void => {
-        if (!request.onEvent) return;
-        delivery = delivery.then(() => request.onEvent?.(event)).then(() => undefined);
-      };
-      const normalizer = new AnthropicMessagesStreamAdapter(deliver);
+      const normalizer = new AnthropicMessagesStreamAdapter(accumulator);
       const stream = client.messages.stream(parameters, { signal: watchdog.signal });
       const responseStart = (): void => {
         watchdog.activity();
@@ -864,34 +846,36 @@ export class AnthropicRuntimeProvider implements RuntimeProvider {
               : {};
             eventName = String(source.type ?? eventName);
             wire(() => request.wireTrace?.event(eventName, event));
+            if (parseFailure) return;
             normalizer.streamEvent(event);
           } catch (error) {
+            parseFailure = error;
+            watchdog.abort(error);
             wire(() => request.wireTrace?.parseError(eventName, rawEventText(event), error));
           }
         });
       });
       const message = await stream.finalMessage();
-      normalizer.finish();
-      await delivery;
+      if (parseFailure) throw parseFailure;
+      request.signal.throwIfAborted();
+      const result = normalizer.finalize(message);
+      await accumulator.drain();
       wireOk = true;
-      return {
-        content: message.content.map(runtimeBlock).filter((value): value is RuntimeContentBlock => Boolean(value)),
-        stop_reason: String(message.stop_reason ?? ""),
-        usage: runtimeUsage(message.usage),
-      };
+      return result;
     } catch (error) {
-      wireError = String(error instanceof Error ? error.message : error);
-      if (request.signal.aborted) throw request.signal.reason ?? new DOMException("Aborted", "AbortError");
-      if (watchdog.timedOut()) {
-        throw new RuntimeProviderError(
-          `provider request idle timed out after ${this.descriptor.requestIdleTimeoutMs}ms`,
-          this.descriptor.name,
-          "请求超时",
-          `${this.descriptor.name} 请求超时，请稍后重试。`,
-          true,
-        );
-      }
-      throw normalizeProviderError(error, this.descriptor);
+      const failure = parseFailure ?? error;
+      const classified = request.signal.aborted
+        ? request.signal.reason ?? new DOMException("Aborted", "AbortError")
+        : watchdog.timedOut()
+          ? new RuntimeProviderError(
+              `provider request idle timed out after ${this.descriptor.requestIdleTimeoutMs}ms`,
+              this.descriptor.name, "请求超时", `${this.descriptor.name} 请求超时，请稍后重试。`, true,
+            )
+          : normalizeProviderError(failure, this.descriptor);
+      wireError = String(classified instanceof Error ? classified.message : classified);
+      accumulator.fail(request.signal.aborted ? "aborted" : "error", classified);
+      await accumulator.drain();
+      throw classified;
     } finally {
       wire(() => request.wireTrace?.end(wireOk, wireError));
       watchdog.cleanup();
@@ -922,12 +906,14 @@ export class AnthropicRuntimeProvider implements RuntimeProvider {
         stream.on?.("contentBlock", () => watchdog.activity());
       } catch { /* SDK diagnostics/activity hooks must not replace Provider behavior. */ }
       const message = await stream.finalMessage();
-      const text = message.content
+      const result = new AnthropicMessagesStreamAdapter(new AssistantMessageAccumulator(this.descriptor)).finalize(message);
+      const text = result.content
         .filter((block) => block.type === "text")
         .map((block) => String(block.text ?? ""))
         .join("")
         .trim();
-      return { text, usage: runtimeUsage(message.usage) };
+      const { status: _status, ...usage } = result.usage;
+      return { text, usage };
     } catch (error) {
       if (request.signal.aborted) throw request.signal.reason ?? new DOMException("Aborted", "AbortError");
       if (watchdog.timedOut()) {

@@ -268,7 +268,7 @@ describe("DashboardService", () => {
           },
           provider: {
             summarize: async () => ({ text: "", usage: { input_tokens: 0, output_tokens: 0 } }),
-            turn: async () => ({ content: [], stop_reason: "end_turn", usage: { input_tokens: 0, output_tokens: 0 } }),
+            turn: async () => ({ id: "test-response", role: "assistant", timestamp: 1000, api: "anthropic_messages", provider: "test", model: "test", content: [], stopReason: "stop", usage: { input_tokens: 0, output_tokens: 0, status: "complete" } }),
           },
         };
       },
