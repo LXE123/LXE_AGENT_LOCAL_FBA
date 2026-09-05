@@ -124,6 +124,7 @@ describe("FinalAnswerStreamer display contract", () => {
       cache_read_input_tokens: 10,
       cache_creation_input_tokens: 2,
     });
+    await streamer.updateContext({ tokens: 112, estimatedTokens: 90, source: "usage_calibrated", contextWindowTokens: 200_000 });
     const commandSecret = "command-secret";
     const outputSecret = "output-secret";
     const call = {
@@ -326,4 +327,24 @@ describe("FinalAnswerStreamer display contract", () => {
     expect(emitted.at(-1)?.process_parts).toEqual([]);
     expect(emitted.at(-1)?.redacted_thinking_count).toBe(0);
   });
+});
+
+test("summary accounting cannot change occupancy and terminal maintenance keeps completed state", async () => {
+  const emitted: EmitRequest[] = [];
+  const streamer = new FinalAnswerStreamer({
+    sessionId:"s",turnId:"t",responseRouteId:"r",emitId:"e",
+    emit: async request => { emitted.push(request); return true; },
+  });
+  await streamer.updateContext({tokens:1000,estimatedTokens:900,source:"usage_calibrated",contextWindowTokens:10000});
+  await streamer.finish("done");
+  streamer.updateUsage({input_tokens:5000,output_tokens:200});
+  await streamer.updateContext({tokens:300,estimatedTokens:200,source:"usage_calibrated",contextWindowTokens:10000});
+  const last=emitted.at(-1);
+  if(last?.emit_kind!=="stream") throw new Error("missing frame");
+  expect(last.state).toBe("final");
+  expect(last.content).toBe("done");
+  expect(last.display_metrics).toMatchObject({status:"completed",context_tokens:300,input_tokens:5000,output_tokens:200});
+  const count=emitted.length;
+  await streamer.updateContext({tokens:300,estimatedTokens:200,source:"usage_calibrated",contextWindowTokens:10000});
+  expect(emitted).toHaveLength(count);
 });

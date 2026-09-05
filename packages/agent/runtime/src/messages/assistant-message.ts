@@ -40,6 +40,7 @@ export interface AssistantMessageError {
 }
 /** One local request attempt. Only its accumulator may mutate it, until terminal delivery. */
 export interface AssistantMessage {
+  contextTokenAnchor?: import("../engine/context-meter").ContextTokenAnchor;
   id: string;
   role: "assistant";
   timestamp: number;

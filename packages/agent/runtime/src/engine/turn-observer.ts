@@ -5,6 +5,7 @@ const PROVIDER_STREAM_HEARTBEAT_MS = 1_000;
 const PROVIDER_STREAM_HEARTBEAT_CHARS = 300;
 
 export interface TurnStartObservation {
+  measurement?: import("./context-meter").ContextMeasurement;
   jobKind: "turn" | "heartbeat";
   provider: string;
   model: string;
@@ -160,7 +161,7 @@ export class RuntimeTurnObserver {
   start(observation: TurnStartObservation): void {
     if (this.started) return;
     this.started = true;
-    const totalTokens = observation.systemTokens + observation.messageTokens;
+    const totalTokens = observation.measurement?.tokens ?? observation.systemTokens + observation.messageTokens;
     this.initialContextTokens = totalTokens;
     this.latestContextTokens = totalTokens;
     const usage = observation.contextCapacity > 0 ? totalTokens / observation.contextCapacity : 0;
@@ -172,9 +173,18 @@ export class RuntimeTurnObserver {
       system_tokens: observation.systemTokens,
       message_tokens: observation.messageTokens,
       context_tokens: totalTokens,
+      ...(observation.measurement ? { context_source: observation.measurement.source, estimated_tokens: observation.measurement.estimatedTokens } : {}),
       context_capacity: observation.contextCapacity,
       context_usage: usage,
       pending_event_count: observation.pendingEventCount,
+    });
+  }
+
+  measurement(measurement: import("./context-meter").ContextMeasurement): void {
+    this.latestContextTokens = measurement.tokens;
+    this.logger.debug("context_measured", {
+      context_tokens: measurement.tokens, estimated_tokens: measurement.estimatedTokens,
+      context_source: measurement.source, context_capacity: measurement.contextWindowTokens,
     });
   }
 

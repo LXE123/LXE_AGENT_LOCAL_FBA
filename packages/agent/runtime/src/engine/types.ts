@@ -49,12 +49,14 @@ export interface RuntimeEnvironmentSnapshot {
 }
 
 export interface RuntimeConversationMessage {
+  contextTokenAnchor?: import("./context-meter").ContextTokenAnchor;
   environmentContext?: RuntimeEnvironmentSnapshot;
   role: "user" | "assistant" | "tool" | "system";
   content: RuntimeMessageContent;
 }
 
 export interface RuntimeCompactionSummaryMessage {
+  contextTokenAnchor?: import("./context-meter").ContextTokenAnchor;
   role: "compactionSummary";
   content?: never;
   summary: string;

@@ -1534,16 +1534,15 @@ const CONTEXT_RING_RADIUS = 8;
 const CONTEXT_RING_CIRCUMFERENCE = 2 * Math.PI * CONTEXT_RING_RADIUS;
 
 /**
- * Reads the newest turn that actually reported usage. `context_tokens` only
- * lands once a request has come back, so before the first turn the meter falls
- * back to the model's declared window and reports a true zero.
+ * Prefer the current turn's estimate, including a valid zero. Legacy turns
+ * without a source retain their provider-usage fallback behavior.
  */
 function latestDisplayMetrics(
   activity: DesktopConversationActivityPayload | null,
 ): DesktopConversationStreamPayload["display_metrics"] | null {
   for (const turn of [activity?.active, activity?.latest]) {
     const metrics = turn?.stream?.display_metrics;
-    if (metrics && metrics.context_window_tokens > 0 && metrics.context_tokens > 0) return metrics;
+    if (metrics && metrics.context_window_tokens > 0 && (metrics.context_source !== undefined || metrics.context_tokens > 0)) return metrics;
   }
   return null;
 }
@@ -1609,7 +1608,7 @@ function ConversationContextMeter({
         data-level={ratio >= 0.9 ? "critical" : ratio >= 0.7 ? "warn" : "normal"}
         onClick={() => setOpen((value) => !value)}
         ref={triggerRef}
-        title={label}
+        title={metrics?.context_source ? `${t.conversation.contextMeter[metrics.context_source]} · ${percent}` : label}
         type="button"
       >
         <svg aria-hidden className="conversation-context-ring" viewBox="0 0 22 22">
@@ -1657,7 +1656,7 @@ function ConversationContextMeter({
           </dl>
           <small>{t.conversation.contextMeter.turnUsageHint}</small>
           <small>
-            {metrics ? t.conversation.contextMeter.snapshotHint : t.conversation.contextMeter.notStartedHint}
+            {metrics?.context_source ? t.conversation.contextMeter[metrics.context_source] : metrics ? t.conversation.contextMeter.snapshotHint : t.conversation.contextMeter.notStartedHint}
           </small>
         </div>
       ) : null}

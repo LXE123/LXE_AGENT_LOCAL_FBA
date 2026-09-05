@@ -2424,3 +2424,59 @@ test("does not execute or synthesize results for truncated tool drafts", async (
   expect(executions).toBe(0);
   expect(store.messages.some((m) => m.role === "tool")).toBe(false);
 });
+
+test("request anchors survive restart and power next-request display without summary usage", async () => {
+  const { requestContextTokenEstimate } = await import("../../src/engine/context");
+  const { normalizeTranscriptMessages } = await import("../../src/state/transcript");
+  const store = new MemoryStore();
+  const requests: RuntimeProviderRequest[] = [];
+  const emitted: EmitRequest[] = [];
+  const makeRuntime = () => new TypeScriptAgentRuntime({
+    store, tools: new ToolRegistry(), systemPrompt:"stable",
+    display: { model:"", contextWindowTokens:256000, toolUseMode:"full", showFullPaths:false },
+    provider: {
+      summarize,
+      turn: async request => {
+        requests.push({...request, messages:structuredClone(request.messages)});
+        return messageFixture({content:[{type:"text",text:"answer"}],stopReason:"stop",
+          usage:{input_tokens:8000,output_tokens:900,cache_read_input_tokens:2000}});
+      },
+    },
+    emitter:{emit:async request=>{emitted.push(request);},typing:async()=>undefined},
+  });
+  for (let i=0;i<2;i++) {
+    const runtime=makeRuntime();
+    await runtime.start();
+    await runtime.runTurn(job({job_id:`anchor-${i}`}),handle());
+    await runtime.stop();
+    store.messages=normalizeTranscriptMessages(store.messages);
+  }
+  const assistants=store.messages.filter(message=>message.role==="assistant");
+  expect(assistants).toHaveLength(2);
+  expect(assistants[0]?.contextTokenAnchor?.requestId).not.toBe(assistants[1]?.contextTokenAnchor?.requestId);
+  const anchor=assistants[1]!.contextTokenAnchor!;
+  expect(anchor.actualInput).toBe(10000);
+  expect(anchor.estimatedInput).toBe(requestContextTokenEstimate(requests[1]!.system,requests[1]!.messages,requests[1]!.tools));
+  const last=emitted.filter(event=>event.emit_kind==="stream").at(-1);
+  if(last?.emit_kind!=="stream") throw new Error("missing display");
+  expect(last.display_metrics.context_source).toBe("usage_calibrated");
+  expect(last.display_metrics.context_tokens).toBeGreaterThan(10000);
+  expect(last.display_metrics.context_tokens).toBeLessThan(10900);
+});
+
+test.each(["partial", "unreported", "zero", "different-model"] as const)("does not anchor %s usage", async kind => {
+  const store=new MemoryStore();
+  const runtime=new TypeScriptAgentRuntime({
+    store,tools:new ToolRegistry(),systemPrompt:"s",
+    provider:{summarize,turn:async()=>messageFixture({
+      content:[{type:"text",text:"done"}],
+      ...(kind==="different-model"?{responseModel:"unexpected"}:{}),
+      usage:{input_tokens:kind==="zero"?0:100,status:kind==="partial"||kind==="unreported"?kind:"complete"},
+    })},
+    emitter:{emit:async()=>undefined,typing:async()=>undefined},
+  });
+  await runtime.start();
+  await runtime.runTurn(job(),handle());
+  await runtime.stop();
+  expect(store.messages.filter(message=>message.contextTokenAnchor!==undefined)).toHaveLength(0);
+});

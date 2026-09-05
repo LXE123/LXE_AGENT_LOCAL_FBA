@@ -88,7 +88,9 @@ export class FinalAnswerStreamer {
   private outputTokens = 0;
   private cacheReadInputTokens = 0;
   private cacheCreationInputTokens = 0;
+  private terminalUsageDirty = false;
   private contextTokens = 0;
+  private contextSource?: "estimated" | "usage_calibrated";
   private displayStatus: DisplayMetrics["status"] = "running";
   private displayPhase: TurnDisplayPhase = "preparing_context";
 
@@ -168,6 +170,17 @@ export class FinalAnswerStreamer {
       .map((p) => p.type === "thinking" ? p.text : "").join("");
   }
 
+  async updateContext(measurement: import("./context-meter").ContextMeasurement): Promise<void> {
+    if (this.deltaFailed || (!this.terminalUsageDirty && this.contextTokens === measurement.tokens && this.contextSource === measurement.source)) return;
+    this.contextTokens = measurement.tokens;
+    this.contextSource = measurement.source;
+    this.terminalUsageDirty = false;
+    if (this.terminal) {
+      await this.pending;
+      await this.emitFrame(this.displayStatus === "error" ? "error" : "final");
+    } else this.scheduleDelta();
+  }
+
   updateUsage(usage: {
     input_tokens: number;
     output_tokens: number;
@@ -177,11 +190,12 @@ export class FinalAnswerStreamer {
     const input = Math.max(0, Math.trunc(usage.input_tokens ?? 0));
     const cacheRead = Math.max(0, Math.trunc(usage.cache_read_input_tokens ?? 0));
     const cacheCreation = Math.max(0, Math.trunc(usage.cache_creation_input_tokens ?? 0));
+    if (this.terminal) this.terminalUsageDirty = true;
     this.inputTokens += input;
     this.outputTokens += Math.max(0, Math.trunc(usage.output_tokens ?? 0));
     this.cacheReadInputTokens += cacheRead;
     this.cacheCreationInputTokens += cacheCreation;
-    this.contextTokens = input + cacheRead + cacheCreation;
+
     // Legacy cumulative channels historically pick usage up with the next
     // content/lifecycle frame. Only Desktop needs a metrics-only mutation.
     if (this.options.emitDesktopBatch) this.scheduleDelta();
@@ -471,6 +485,7 @@ export class FinalAnswerStreamer {
         cache_read_input_tokens: this.cacheReadInputTokens,
         cache_creation_input_tokens: this.cacheCreationInputTokens,
         context_tokens: this.contextTokens,
+        ...(this.contextSource ? { context_source: this.contextSource } : {}),
         context_window_tokens: Math.max(0, Math.trunc(this.options.contextWindowTokens ?? 0)),
       },
     };

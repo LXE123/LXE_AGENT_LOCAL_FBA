@@ -1,3 +1,4 @@
+import { validContextAnchor } from "../engine/context-meter";
 import type { JsonObject } from "@lxe/protocol";
 import type { RuntimeConversationMessage, RuntimeMessage } from "../engine/types";
 
@@ -45,6 +46,11 @@ const normalizeLegacyBlock = (value: unknown): JsonObject | undefined => {
   return block;
 };
 
+const anchorMetadata = (value: unknown) => {
+  const source = value as { role?: unknown; contextTokenAnchor?: unknown };
+  return (source.role === "assistant" || source.role === "compactionSummary") && validContextAnchor(source.contextTokenAnchor)
+    ? { contextTokenAnchor: source.contextTokenAnchor } : {};
+};
 export const normalizeTranscriptMessage = (value: unknown): RuntimeMessage | undefined => {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
   const candidate = value as { role?: unknown; content?: unknown; summary?: unknown; tokensBefore?: unknown; details?: unknown };
@@ -60,11 +66,11 @@ export const normalizeTranscriptMessage = (value: unknown): RuntimeMessage | und
     const modifiedFiles = [...new Set(details.modifiedFiles.map((path) => path.trim()).filter(Boolean))].sort();
     const modified = new Set(modifiedFiles);
     const readFiles = [...new Set(details.readFiles.map((path) => path.trim()).filter((path) => path && !modified.has(path)))].sort();
-    return { role: "compactionSummary", summary, tokensBefore, details: { readFiles, modifiedFiles } };
+    return { ...anchorMetadata(value), role: "compactionSummary", summary, tokensBefore, details: { readFiles, modifiedFiles } };
   }
   if (!new Set(["user", "assistant", "tool", "system"]).has(legacyRole)) return undefined;
   let role = legacyRole as RuntimeConversationMessage["role"];
-  if (!Array.isArray(candidate.content)) return { ...environmentMetadata(value), role, content: String(candidate.content ?? "") };
+  if (!Array.isArray(candidate.content)) return { ...environmentMetadata(value), ...anchorMetadata(value), role, content: String(candidate.content ?? "") };
   const content = candidate.content.map(normalizeLegacyBlock)
     .filter((block): block is JsonObject => Boolean(block));
   // Early Bun transcripts persisted Anthropic wire messages directly. Recover
@@ -79,7 +85,7 @@ export const normalizeTranscriptMessage = (value: unknown): RuntimeMessage | und
       if (source[key] !== undefined) metadata[key] = source[key];
     }
   }
-  return { ...environmentMetadata(value), ...metadata, role, content } as RuntimeMessage;
+  return { ...environmentMetadata(value), ...anchorMetadata(value), ...metadata, role, content } as RuntimeMessage;
 };
 
 export const normalizeTranscriptMessages = (values: unknown[]): RuntimeMessage[] =>

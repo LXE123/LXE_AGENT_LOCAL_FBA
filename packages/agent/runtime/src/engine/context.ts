@@ -1,3 +1,4 @@
+import { latestContextAnchor, measureContext } from "./context-meter";
 import type { JsonObject, JsonValue } from "@lxe/protocol";
 import { isAbsolute } from "node:path";
 import { createLogger } from "@lxe/core";
@@ -200,7 +201,7 @@ export function requestContextTokenEstimate(
     messages.reduce((total, message) => total + estimateTokens(
       message.role === "compactionSummary"
         ? { role: "user", content: compactionSummaryProviderText(message.summary) }
-        : message,
+        : { role: message.role, content: message.content },
     ), 0) +
     estimateTokens(toolSchemas);
 }
@@ -265,6 +266,7 @@ export function cleanCanonicalMessages(messages: readonly RuntimeMessage[]): Run
       const modified = new Set(modifiedFiles);
       const readFiles = [...new Set(raw.details.readFiles.map((path) => path.trim()).filter((path) => path && !modified.has(path)))].sort();
       cleaned.push({
+        ...(raw.contextTokenAnchor ? { contextTokenAnchor: raw.contextTokenAnchor } : {}),
         role,
         summary,
         tokensBefore: Math.max(0, Math.trunc(raw.tokensBefore)),
@@ -283,7 +285,7 @@ export function cleanCanonicalMessages(messages: readonly RuntimeMessage[]): Run
     if (!Array.isArray(raw.content)) {
       if (role === "tool") continue;
       cleaned.push(role === "assistant"
-        ? { role, content: [{ type: "text", text: text(raw.content) }] }
+        ? { ...raw, role, content: [{ type: "text", text: text(raw.content) }] }
         : { ...raw, role, content: text(raw.content) });
       continue;
     }
@@ -836,6 +838,9 @@ export interface ContextPipelineOptions {
 }
 
 export class ContextPipeline {
+  measure(system: string, messages: RuntimeMessage[], tools: ToolSchema[], fingerprint?: string) {
+    return measureContext(messages, requestContextTokenEstimate(system, messages, tools), fingerprint, this.contextWindowTokens);
+  }
   private readonly logger = createLogger("runtime.context");
   private readonly contextWindowTokens: number;
   private readonly reserveTokens: number;
@@ -864,6 +869,7 @@ export class ContextPipeline {
     messages: RuntimeMessage[];
     systemPrompt: string;
     toolSchemas: ToolSchema[];
+    contextFingerprint?: string;
     signal: AbortSignal;
     userIdentity?: RuntimeProviderUserIdentity;
     trigger?: "pre_call" | "overflow" | "post_turn";
@@ -875,7 +881,7 @@ export class ContextPipeline {
     if (sanitized.changed) {
       await this.options.store.replaceMessages(params.sessionId, messages, "repair", { reason: `${trigger}_repair` });
     }
-    const beforeTokens = requestContextTokenEstimate(params.systemPrompt, messages, params.toolSchemas);
+    const beforeTokens = this.measure(params.systemPrompt, messages, params.toolSchemas, params.contextFingerprint).tokens;
     const additionalTokens = Math.max(0, params.additionalContextTokens ?? 0);
     const hardLimit = this.hardLimitTokens - additionalTokens;
     const triggerLimit = trigger === "pre_call"
@@ -897,11 +903,13 @@ export class ContextPipeline {
 
     const compacted = await this.compact({ ...params, messages, trigger, beforeTokens });
     messages = compacted.messages;
-    const afterTokens = requestContextTokenEstimate(params.systemPrompt, messages, params.toolSchemas);
+    const afterTokens = this.measure(params.systemPrompt, messages, params.toolSchemas, params.contextFingerprint).tokens;
     return { ...compacted, afterTokens, hardLimitExceeded: afterTokens > hardLimit };
   }
 
   async postTurn(params: {
+    toolSchemas?: ToolSchema[];
+    contextFingerprint?: string;
     sessionId: string;
     messages: RuntimeMessage[];
     systemPrompt: string;
@@ -918,7 +926,7 @@ export class ContextPipeline {
     return this.prepare({
       ...params,
       messages,
-      toolSchemas: [],
+      toolSchemas: params.toolSchemas ?? [],
       trigger: "post_turn",
     });
   }
@@ -928,6 +936,7 @@ export class ContextPipeline {
     messages: RuntimeMessage[];
     systemPrompt: string;
     toolSchemas: ToolSchema[];
+    contextFingerprint?: string;
     signal: AbortSignal;
     userIdentity?: RuntimeProviderUserIdentity;
     trigger: "pre_call" | "overflow" | "post_turn";
@@ -1106,6 +1115,7 @@ export class ContextPipeline {
       messages: RuntimeMessage[];
       systemPrompt: string;
       toolSchemas: ToolSchema[];
+      contextFingerprint?: string;
       signal: AbortSignal;
       userIdentity?: RuntimeProviderUserIdentity;
       trigger: "pre_call" | "overflow" | "post_turn";
@@ -1120,7 +1130,12 @@ export class ContextPipeline {
     fileInventory: FileInventory,
   ): Promise<ContextCompactionResult> {
     const sanitized = sanitizeMessagesForProvider(messages).messages;
-    const afterTokens = requestContextTokenEstimate(params.systemPrompt, sanitized, params.toolSchemas);
+    const anchor = latestContextAnchor(params.messages);
+    if (anchor && !sanitized.some(message => message.contextTokenAnchor?.requestId === anchor.requestId)) {
+      const summary = sanitized.find(message => message.role === "compactionSummary");
+      if (summary) summary.contextTokenAnchor = anchor;
+    }
+    const afterTokens = this.measure(params.systemPrompt, sanitized, params.toolSchemas, params.contextFingerprint).tokens;
     if (afterTokens >= params.beforeTokens) {
       this.logger.warn("context summary did not reduce tokens", {
         trigger: params.trigger,

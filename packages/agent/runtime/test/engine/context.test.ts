@@ -616,3 +616,36 @@ src/b.ts
     expect(JSON.stringify(result.messages)).not.toContain("secret-base64");
   });
 });
+
+test("calibrated compaction transfers a removed anchor and preserves signed pressure after replay", async () => {
+  const { contextFingerprint, latestContextAnchor } = await import("../../src/engine/context-meter");
+  const { normalizeTranscriptMessages } = await import("../../src/state/transcript");
+  const store = new MemoryStore();
+  const provider = new SummaryProvider();
+  const pipeline = new ContextPipeline({ provider, store, contextWindowTokens: 2000, reserveTokens: 100, recentRawTokens: 100, preCallThreshold: 0.5 });
+  const fingerprint = contextFingerprint("request");
+  const messages: RuntimeMessage[] = [...closedTurn("old", 8000), ...closedTurn("recent", 20)];
+  const estimatedInput = requestContextTokenEstimate("system", messages);
+  const anchor = { version: 1 as const, requestId: "old-request", fingerprint, estimatedInput, actualInput: estimatedInput + 100 };
+  messages[1]!.contextTokenAnchor = anchor;
+  const result = await pipeline.prepare({sessionId:"s1",messages,systemPrompt:"system",toolSchemas:[],contextFingerprint:fingerprint,signal:new AbortController().signal});
+  expect(result.compacted).toBe(true);
+  expect(result.messages[0]?.contextTokenAnchor).toEqual(anchor);
+  expect(latestContextAnchor(normalizeTranscriptMessages(store.messages))).toEqual(anchor);
+  expect(result.afterTokens).toBe(requestContextTokenEstimate("system",result.messages)+100);
+  expect(provider.requests.length).toBeGreaterThan(0);
+});
+
+test("calibrated pressure rather than full heuristic controls threshold", async () => {
+  const { contextFingerprint } = await import("../../src/engine/context-meter");
+  const store = new MemoryStore();
+  const provider = new SummaryProvider();
+  const pipeline = new ContextPipeline({provider,store,contextWindowTokens:2000,reserveTokens:100,preCallThreshold:0.5});
+  const fingerprint = contextFingerprint("same");
+  const messages: RuntimeMessage[] = closedTurn("large",8000);
+  messages[1]!.contextTokenAnchor = {version:1,requestId:"r",fingerprint,estimatedInput:requestContextTokenEstimate("s",messages),actualInput:100};
+  const result = await pipeline.prepare({sessionId:"s",messages,systemPrompt:"s",toolSchemas:[],contextFingerprint:fingerprint,signal:new AbortController().signal});
+  expect(result.compacted).toBe(false);
+  expect(result.beforeTokens).toBe(100);
+  expect(provider.requests).toHaveLength(0);
+});

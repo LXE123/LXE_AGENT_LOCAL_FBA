@@ -1,3 +1,4 @@
+import { contextFingerprint } from "./context-meter";
 import { captureEnvironment, environmentChanged, environmentMessage } from "./environment-context";
 import { randomUUID } from "node:crypto";
 import { basename, isAbsolute } from "node:path";
@@ -371,7 +372,7 @@ export class TypeScriptAgentRuntime implements AgentRuntime {
       else if (pendingEvents.length > 0) observer.pendingEvents("attached", pendingEvents.length);
       if (heartbeat && pendingEvents.length === 0) {
         observer.start({
-          jobKind: "heartbeat",
+        jobKind: "heartbeat",
           provider: descriptor?.name ?? "custom",
           model: descriptor?.model ?? this.options.display?.model ?? "",
           messageTurns: 0,
@@ -417,6 +418,15 @@ export class TypeScriptAgentRuntime implements AgentRuntime {
       const systemPrompt = typeof this.options.systemPrompt === "function"
         ? this.options.systemPrompt(systemPromptContext)
         : this.options.systemPrompt;
+      const fingerprintFor = (toolSchemas: ReturnType<typeof toolExposure.schemas>, isLastStep: boolean) => contextFingerprint({
+          provider: systemPromptContext.provider, model: systemPromptContext.model,
+          api: descriptor?.apiStyle, endpoint: descriptor?.baseURL,
+          thinkingStyle: descriptor?.thinkingStyle, thinkingEnabled: descriptor?.thinkingEnabled,
+          thinkingEffort: descriptor?.thinkingEffort, thinkingBudget: descriptor?.thinkingBudgetTokens,
+          thinkingDisplay: descriptor?.thinkingDisplay, supportsVision: descriptor?.supportsVision,
+          maxTokens: descriptor?.maxTokens, toolStream: descriptor?.toolStream,
+          system: systemPrompt, tools: toolSchemas, toolChoice: heartbeat || isLastStep ? "none" : "auto",
+        });
       const turnContext: RuntimeTurnContextRecord = {
         turn_id: job.job_id,
         job_kind: heartbeat ? "heartbeat" : "turn",
@@ -436,7 +446,11 @@ export class TypeScriptAgentRuntime implements AgentRuntime {
         : userContentWithSystemEvents(job.user_input, job.user_content_blocks, pendingEvents);
       const userMessage: RuntimeMessage = { role: "user", content: withTurnContext(userContent, job.diagnostics) };
       messages.push(userMessage);
+      const firstTools = heartbeat || (this.options.maxSteps ?? DEFAULT_MAX_STEPS) <= 1 ? [] : toolExposure.schemas();
+      const initialMeasurement = contextPipeline.measure(systemPrompt, messages, firstTools,
+        fingerprintFor(firstTools, (this.options.maxSteps ?? DEFAULT_MAX_STEPS) <= 1));
       observer.start({
+        measurement: initialMeasurement,
         jobKind: heartbeat ? "heartbeat" : "turn",
         provider: descriptor?.name ?? "custom",
         model: descriptor?.model ?? this.options.display?.model ?? "",
@@ -447,6 +461,7 @@ export class TypeScriptAgentRuntime implements AgentRuntime {
         pendingEventCount: pendingEvents.length,
       });
       await this.appendMessage(job.session_id, userMessage, heartbeat ? "heartbeat" : "turn_input", job.job_id);
+      await finalAnswerStreamer?.updateContext(initialMeasurement);
       if (!heartbeat && job.user_content_blocks.some((block) => block.type === "local_file")) {
         await this.notifySessionChanged(job.session_id, "attachments");
       }
@@ -476,6 +491,12 @@ export class TypeScriptAgentRuntime implements AgentRuntime {
         await appendSteering();
         const isLastStep = step === maxSteps - 1;
         const toolSchemas = heartbeat || isLastStep ? [] : toolExposure.schemas();
+        const fingerprint = fingerprintFor(toolSchemas, isLastStep);
+        const updateContext = async () => {
+          const measurement = contextPipeline.measure(systemPrompt, messages, toolSchemas, fingerprint);
+          observer.measurement(measurement);
+          await finalAnswerStreamer?.updateContext(measurement);
+        };
         const prepareRequestContext = async (): Promise<void> => {
           let snapshot = captureEnvironment({ ...systemPromptContext, ...(this.options.artifactRoot ? { artifactRoot: this.options.artifactRoot } : {}) });
           let environment = environmentMessage(snapshot);
@@ -487,7 +508,8 @@ export class TypeScriptAgentRuntime implements AgentRuntime {
             signal: handle.signal,
             userIdentity,
             trigger: "pre_call",
-            additionalContextTokens: estimateTokens(environment),
+            contextFingerprint: fingerprint,
+            additionalContextTokens: estimateTokens({ role: environment.role, content: environment.content }),
           });
           accountContext(prepared);
           observer.context(prepared);
@@ -502,12 +524,13 @@ export class TypeScriptAgentRuntime implements AgentRuntime {
           snapshot = captureEnvironment({ ...systemPromptContext, ...(this.options.artifactRoot ? { artifactRoot: this.options.artifactRoot } : {}) });
           environment = environmentMessage(snapshot);
           if (environmentChanged(messages, snapshot)) {
-            const tokens = requestContextTokenEstimate(systemPrompt, [...messages, environment], toolSchemas);
+            const tokens = contextPipeline.measure(systemPrompt, [...messages, environment], toolSchemas, fingerprint).tokens;
             if (tokens > contextPipeline.hardLimitTokens) throw new ContextOverflowError(tokens, contextPipeline.hardLimitTokens);
             await this.appendMessage(job.session_id, environment, "environment_context", job.job_id);
             messages.push(environment);
             observer.context({ ...prepared, afterTokens: tokens });
           }
+          await updateContext();
         };
         const providerRequest = (
           attemptObserver: ReturnType<RuntimeTurnObserver["providerAttempt"]>,
@@ -550,7 +573,19 @@ export class TypeScriptAgentRuntime implements AgentRuntime {
             });
             try {
               await finalAnswerStreamer?.startWaitingModel();
-              const response = await provider.turn(providerRequest(attemptObserver, wireTrace));
+              const request = providerRequest(attemptObserver, wireTrace);
+              const estimatedInput = requestContextTokenEstimate(request.system, request.messages, request.tools);
+              const requestId = randomUUID();
+              const response = structuredClone(await provider.turn(request));
+              delete response.contextTokenAnchor;
+              const usage = response.usage;
+              const actualInput = usage.input_tokens + (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0);
+              if (!isCancelled(handle) && ["stop", "length", "toolUse"].includes(response.stopReason) &&
+                usage.status === "complete" && [usage.input_tokens, usage.output_tokens, usage.cache_read_input_tokens ?? 0, usage.cache_creation_input_tokens ?? 0]
+                  .every(value => Number.isSafeInteger(value) && value >= 0) && Number.isSafeInteger(actualInput) && actualInput > 0 &&
+                (!response.responseModel || response.responseModel === systemPromptContext.model)) {
+                response.contextTokenAnchor = { version: 1, requestId, fingerprint, estimatedInput, actualInput };
+              }
               accountMessage(response);
               attemptObserver.succeed(response);
               return response;
@@ -585,6 +620,7 @@ export class TypeScriptAgentRuntime implements AgentRuntime {
             signal: handle.signal,
             userIdentity,
             trigger: "overflow",
+            contextFingerprint: fingerprint,
           });
           accountContext(overflow);
           observer.context(overflow);
@@ -605,10 +641,11 @@ export class TypeScriptAgentRuntime implements AgentRuntime {
           ? [{ type: "text", text: forcedLastStepReply }]
           : response.content;
         const assistant: RuntimeMessage = forcedLastStepReply
-          ? { role: "assistant", content: assistantContent }
+          ? { role: "assistant", content: assistantContent, ...(response.contextTokenAnchor ? { contextTokenAnchor: response.contextTokenAnchor } : {}) }
           : response;
         messages.push(assistant);
         await this.appendMessage(job.session_id, assistant, "assistant_response", job.job_id);
+        await updateContext();
         if (calls.length === 0 || isLastStep) {
           const reply = responseText;
           const streamDelivered = finalAnswerStreamer ? await finalAnswerStreamer.finish(reply) : false;
@@ -619,6 +656,7 @@ export class TypeScriptAgentRuntime implements AgentRuntime {
           if (!heartbeat && !isCancelled(handle)) {
             try {
               const postTurn = await contextPipeline.postTurn({
+                toolSchemas, contextFingerprint: fingerprint,
                 sessionId: job.session_id,
                 messages,
                 systemPrompt,
@@ -628,6 +666,7 @@ export class TypeScriptAgentRuntime implements AgentRuntime {
               accountContext(postTurn);
               observer.context(postTurn);
               messages = postTurn.messages;
+              await updateContext();
               if (postTurn.failureReason) {
                 throw new ContextCompactionError(postTurn.failureReason, postTurn.afterTokens);
               }
@@ -781,6 +820,7 @@ export class TypeScriptAgentRuntime implements AgentRuntime {
             const steeredTools: RuntimeMessage = { role: "tool", content: orderedResults() };
             messages.push(steeredTools);
             await this.appendMessage(job.session_id, steeredTools, "tool_results_steered", job.job_id);
+            await updateContext();
             await appendSteering(steering);
             interruptedBySteering = true;
             break;
@@ -798,6 +838,7 @@ export class TypeScriptAgentRuntime implements AgentRuntime {
             const cancelledTools: RuntimeMessage = { role: "tool", content: orderedResults() };
             messages.push(cancelledTools);
             await this.appendMessage(job.session_id, cancelledTools, "tool_results_cancelled", job.job_id);
+            await updateContext();
             await finalAnswerStreamer?.cancel();
             await recordUsage("cancelled");
             return this.outcome("cancelled", "", inputTokens, outputTokens, toolCalls);
@@ -819,6 +860,7 @@ export class TypeScriptAgentRuntime implements AgentRuntime {
         const toolMessage: RuntimeMessage = { role: "tool", content: trimmedResults };
         messages.push(toolMessage);
         await this.appendMessage(job.session_id, toolMessage, "tool_results", job.job_id);
+        await updateContext();
       }
       const reply = MAX_STEP_REPLY;
       const terminal: RuntimeMessage = { role: "assistant", content: [{ type: "text", text: reply }] };

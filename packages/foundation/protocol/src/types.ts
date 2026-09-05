@@ -130,7 +130,7 @@ export type TurnDisplayPhase =
   | "running_tool"
   | "generating_answer";
 
-export interface DisplayMetrics extends JsonObject {
+export type DisplayMetrics = JsonObject & {
   status: TurnDisplayStatus;
   phase: TurnDisplayPhase;
   elapsed_ms: number;
@@ -140,6 +140,7 @@ export interface DisplayMetrics extends JsonObject {
   cache_read_input_tokens: number;
   cache_creation_input_tokens: number;
   context_tokens: number;
+  context_source?: "estimated" | "usage_calibrated";
   context_window_tokens: number;
 }
 
