@@ -113,6 +113,7 @@ export class LocalConversationController {
     session_id?: string;
     text: string;
     attachments?: LocalConversationAttachment[];
+    client_message_id?: string;
   }): Promise<DesktopConversationSendPayload> {
     const text = clean(input.text);
     const attachments = input.attachments ?? [];
@@ -185,7 +186,7 @@ export class LocalConversationController {
       sender_nick: "Desktop",
       workspace: session.workspace,
       source,
-      raw_data: { origin: DESKTOP_PLATFORM },
+      raw_data: { origin: DESKTOP_PLATFORM, ...(input.client_message_id ? { client_message_id: input.client_message_id } : {}) },
       user_content_blocks: userContentBlocks,
       diagnostics: [],
     };
@@ -197,6 +198,7 @@ export class LocalConversationController {
       payload: {
         turn_id: turnId,
         message_id: messageId,
+      ...(input.client_message_id ? { client_message_id: input.client_message_id } : {}),
         text,
         ...(attachments.length > 0 ? { attachments: attachments.map(publicAttachment) } : {}),
         state: "queued",
@@ -219,6 +221,7 @@ export class LocalConversationController {
       session_id: sessionId,
       turn_id: turnId,
       message_id: messageId,
+      ...(input.client_message_id ? { client_message_id: input.client_message_id } : {}),
       created,
       state: turn.payload.state === "running" ? "running" : "queued",
     };

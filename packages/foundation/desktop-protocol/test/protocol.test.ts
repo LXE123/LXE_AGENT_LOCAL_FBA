@@ -473,3 +473,9 @@ describe("desktop agent protocol", () => {
     })).toThrow("too large");
   });
 });
+
+test("conversation identity and bidirectional cursor inputs are explicit", () => {
+  expect(parseDashboardRpcCall({operation:"sessions.send",input:{text:"hello",client_message_id:"client-1"}})).toEqual({operation:"sessions.send",input:{text:"hello",client_message_id:"client-1"}});
+  expect(parseDashboardRpcCall({operation:"sessions.detail",input:{session_id:"s",message_after:"cursor"}})).toEqual({operation:"sessions.detail",input:{session_id:"s",message_limit:10,message_after:"cursor"}});
+  expect(()=>parseDashboardRpcCall({operation:"sessions.detail",input:{session_id:"s",message_before:"a",message_after:"b"}})).toThrow("mutually exclusive");
+});

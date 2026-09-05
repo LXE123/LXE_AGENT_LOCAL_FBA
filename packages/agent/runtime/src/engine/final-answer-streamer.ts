@@ -270,7 +270,7 @@ export class FinalAnswerStreamer {
       ...(this.options.showFullPaths === undefined ? {} : { showFullPaths: this.options.showFullPaths }),
     });
     this.upsertTool(step);
-    const partId = randomUUID();
+    const partId = `tool:${call.id}`;
     this.toolPartIds.set(call.id, partId);
     this.addPart({
       type: "tool",

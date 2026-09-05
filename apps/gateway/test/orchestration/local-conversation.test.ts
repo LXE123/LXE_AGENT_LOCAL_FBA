@@ -657,3 +657,12 @@ describe("LocalConversationController", () => {
     h.controller.dispose();
   });
 });
+
+test("client message identity follows acknowledgement, activity and runtime input", async () => {
+  const h=harness(["session","turn","message","route"]);
+  const result=await h.controller.send({text:"hello",client_message_id:"client"});
+  await tick();
+  expect(result.client_message_id).toBe("client");
+  expect(h.runtime.started[0]?.raw_data.client_message_id).toBe("client");
+  expect(JSON.stringify(h.activities)).toContain('"client_message_id":"client"');
+});

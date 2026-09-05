@@ -557,3 +557,23 @@ test("retains assistant origin and replay metadata across a cold transcript relo
   try { expect(await reopened.loadMessages("s1")).toEqual([message]); }
   finally { await reopened.stop(); }
 });
+
+test("display cursors page both ways with stable identities and preserve internal provenance", async () => {
+  const root=mkdtempSync(join(tmpdir(),"lxe-display-window-")); roots.push(root);
+  const path=join(root,"agent.sqlite3"); const store=new SqliteRuntimeStore(path); await store.start();
+  try {
+    await store.ensureSession({session_id:"s",workspace:testWorkspace,source:{platform:"desktop"}});
+    for(let i=0;i<25;i++) await store.appendMessage("s",{role:"user",content:`message ${i}`,message_id:`m${i}`,client_message_id:`c${i}`},i===10?"environment_context":"turn_input",`turn${i}`);
+    const tail=await store.sessionDetail("s",{limit:10}) as any;
+    const older=await store.sessionDetail("s",{limit:10,before:tail.messages_page.previous_cursor}) as any;
+    const again=await store.sessionDetail("s",{limit:10,after:older.messages_page.next_cursor}) as any;
+    expect(again.messages).toEqual(tail.messages);
+    expect(older.messages.find((m:any)=>m.message_id==="m10").source_reason).toBe("environment_context");
+    expect(tail.messages[0].client_message_id).toBe("c15");
+    await expect(store.sessionDetail("s",{limit:10,before:tail.messages_page.previous_cursor,after:older.messages_page.next_cursor})).rejects.toThrow("mutually exclusive");
+    const replay=await store.loadMessages("s"); expect((replay[15] as any).client_message_id).toBe("c15");
+    await store.appendMessage("s",{role:"user",content:"new"},"turn_input","turn25");
+    const reread=await store.sessionDetail("s",{limit:10,after:older.messages_page.next_cursor}) as any;
+    expect(reread.messages.map((m:any)=>m.display_id)).toEqual(tail.messages.map((m:any)=>m.display_id));
+  } finally { await store.stop(); }
+});

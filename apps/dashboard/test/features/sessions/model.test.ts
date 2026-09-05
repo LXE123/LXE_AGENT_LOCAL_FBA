@@ -88,13 +88,14 @@ describe("conversation cursor windows", () => {
     });
   });
 
-  test("resets to a non-overlapping latest window instead of showing a gap", () => {
+  test("keeps the reading window when the latest tail has no overlap", () => {
     const merged = mergeLatestConversationWindow(
       detail(["g0", "g1"]),
       detail(["g10", "g11"], { total: 12 }),
     );
-    expect(merged.messages.map((message) => message.display_group_id)).toEqual(["g10", "g11"]);
-    expect(merged.messages_page.oldest_cursor).toBe("g10");
+    expect(merged.messages.map((message) => message.display_group_id)).toEqual(["g0", "g1"]);
+    expect(merged.messages_page.oldest_cursor).toBe("g0");
+    expect(merged.messages_page.has_next).toBe(true);
   });
 
   test("prepends older groups without replacing the latest watermark", () => {

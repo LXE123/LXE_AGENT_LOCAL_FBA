@@ -346,6 +346,7 @@ export class DashboardService {
       detail = await this.options.store.sessionDetail(input.session_id, {
         limit: integer(input.message_limit, 10, 1, 200),
         ...(input.message_before === undefined ? {} : { before: input.message_before }),
+        ...(input.message_after === undefined ? {} : { after: input.message_after }),
       });
     } catch (error) {
       if (error instanceof InvalidTranscriptCursorError) rpcError("invalid_argument", error.message);

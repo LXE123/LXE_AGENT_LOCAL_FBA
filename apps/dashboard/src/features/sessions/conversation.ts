@@ -412,7 +412,7 @@ const containsToolCall = (message: SessionMessage): boolean =>
     && message.tool_calls !== null
     && (!Array.isArray(message.tool_calls) || message.tool_calls.length > 0));
 
-function fallbackToolCallBlocks(value: unknown): unknown[] {
+export function fallbackToolCallBlocks(value: unknown): unknown[] {
   const calls = Array.isArray(value) ? value : [value];
   return calls.map((call) => {
     if (isToolCallBlock(call)) return call;

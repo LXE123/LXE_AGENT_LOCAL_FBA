@@ -10,6 +10,8 @@ import { callDashboard } from "./client";
 import { dashboardQueryKeys } from "./query-keys";
 import {
   mergeLatestConversationWindow,
+  appendConversationWindow,
+  boundConversationWindow,
   normalizeSessionList,
   prependConversationWindow,
 } from "../features/sessions/model";
@@ -104,80 +106,77 @@ export function useSessionDetailQuery(sessionId: string, before: string | undefi
 export function useSessionConversationQuery(sessionId: string, enabled = true) {
   const queryClient = useQueryClient();
   const latestQuery = useSessionDetailQuery(sessionId, undefined, enabled);
-  const [windowState, setWindowState] = useState<{
-    sessionId: string;
-    data: SessionDetailPayload;
-  } | null>(null);
-  const [fetchingPrevious, setFetchingPrevious] = useState(false);
-  const [previousError, setPreviousError] = useState<unknown>(null);
-  const windowRef = useRef(windowState);
-  const previousRequestRef = useRef<Promise<SessionDetailPayload | undefined> | null>(null);
-  windowRef.current = windowState;
-
+  const [data, setData] = useState<SessionDetailPayload>();
+  const state = useRef<SessionDetailPayload | undefined>(undefined);
+  const visible = useRef<string[]>([]);
+  const generation = useRef(0);
+  const currentSession = useRef(sessionId);
+  currentSession.current = sessionId;
+  const requests = useRef(new Map<string, Promise<SessionDetailPayload | undefined>>());
+  const [fetching, setFetching] = useState<string | null>(null);
+  const [pageError, setPageError] = useState<unknown>(null);
+  const publish = useCallback((value: SessionDetailPayload) => { state.current = value; setData(value); }, []);
   useEffect(() => {
-    setWindowState(null);
-    windowRef.current = null;
-    setPreviousError(null);
-    previousRequestRef.current = null;
-  }, [sessionId]);
-
+    generation.current += 1;
+    state.current = undefined; setData(undefined); visible.current = []; requests.current.clear();
+    setPageError(null); setFetching(null);
+    return () => {
+      generation.current += 1;
+      queryClient.removeQueries({ queryKey: dashboardQueryKeys.sessions.detailSession(sessionId), type: "inactive" });
+    };
+  }, [sessionId, queryClient]);
   useEffect(() => {
     const latest = latestQuery.data;
-    if (!latest || latest.session.session_id !== sessionId) return;
-    setWindowState((current) => ({
-      sessionId,
-      data: mergeLatestConversationWindow(
-        current?.sessionId === sessionId ? current.data : undefined,
-        latest,
-      ),
-    }));
-  }, [latestQuery.data, sessionId]);
-
-  const data = windowState?.sessionId === sessionId ? windowState.data : undefined;
-  const fetchPreviousPage = useCallback((): Promise<SessionDetailPayload | undefined> => {
-    if (previousRequestRef.current) return previousRequestRef.current;
-    const current = windowRef.current?.sessionId === sessionId ? windowRef.current.data : undefined;
-    const before = current?.messages_page.previous_cursor;
-    if (!enabled || !sessionId || !before) return Promise.resolve(undefined);
-    setFetchingPrevious(true);
-    setPreviousError(null);
-    const request = queryClient.fetchQuery({
-      queryKey: dashboardQueryKeys.sessions.detail(sessionId, before),
-      queryFn: () => callDashboard({
-        operation: "sessions.detail",
-        input: {
-          session_id: sessionId,
-          message_limit: SESSION_MESSAGE_PAGE_LIMIT,
-          message_before: before,
-        },
-      }),
-      staleTime: Number.POSITIVE_INFINITY,
-    }).then((earlier) => {
-      setWindowState((latest) => latest?.sessionId === sessionId
-        ? { sessionId, data: prependConversationWindow(latest.data, earlier) }
-        : latest);
-      return earlier;
+    if (latest?.session.session_id !== sessionId) return;
+    publish(boundConversationWindow(mergeLatestConversationWindow(state.current, latest), visible.current));
+  }, [latestQuery.data, sessionId, publish]);
+  const fetchPage = useCallback((direction: "older" | "newer"): Promise<SessionDetailPayload | undefined> => {
+    const existing = requests.current.get(direction);
+    if (existing) return existing;
+    const page = state.current;
+    const cursor = direction === "older" ? page?.messages_page.previous_cursor : page?.messages_page.next_cursor;
+    if (!enabled || !cursor || page?.session.session_id !== sessionId) return Promise.resolve(undefined);
+    const epoch = generation.current;
+    setFetching(direction); setPageError(null);
+    const request = callDashboard({ operation: "sessions.detail", input: {
+      session_id: sessionId, message_limit: SESSION_MESSAGE_PAGE_LIMIT,
+      ...(direction === "older" ? { message_before: cursor } : { message_after: cursor }),
+    } }).then((incoming) => {
+      if (epoch !== generation.current || currentSession.current !== sessionId || !state.current) return undefined;
+      const merged = direction === "older" ? prependConversationWindow(state.current, incoming) : appendConversationWindow(state.current, incoming);
+      const bounded = boundConversationWindow(merged, visible.current, direction);
+      publish(bounded);
+      return bounded;
     }).catch((error: unknown) => {
-      setPreviousError(error);
+      if (epoch === generation.current && currentSession.current === sessionId) setPageError(error);
       throw error;
     }).finally(() => {
-      previousRequestRef.current = null;
-      setFetchingPrevious(false);
+      if (epoch !== generation.current || currentSession.current !== sessionId) return;
+      requests.current.delete(direction); setFetching(null);
     });
-    previousRequestRef.current = request;
+    requests.current.set(direction, request);
     return request;
-  }, [enabled, queryClient, sessionId]);
-
+  }, [enabled, sessionId, publish]);
+  const jumpToLatest = useCallback(() => {
+    generation.current += 1; requests.current.clear(); setFetching(null); setPageError(null); visible.current = [];
+    if (latestQuery.data?.session.session_id === sessionId) publish(boundConversationWindow(latestQuery.data));
+    void latestQuery.refetch();
+  }, [latestQuery.data, latestQuery.refetch, sessionId, publish]);
   return {
-    data,
-    error: previousError ?? latestQuery.error,
+    data: data?.session.session_id === sessionId ? data : undefined,
+    error: pageError ?? latestQuery.error,
     isPending: latestQuery.isPending && !data,
-    isFetching: latestQuery.isFetching || fetchingPrevious,
+    isFetching: latestQuery.isFetching || fetching !== null,
     isRefetchError: latestQuery.isRefetchError,
     hasPreviousPage: Boolean(data?.messages_page.has_previous),
-    isFetchingPreviousPage: fetchingPrevious,
-    isFetchPreviousPageError: previousError !== null,
-    fetchPreviousPage,
+    hasNextPage: Boolean(data?.messages_page.has_next),
+    isFetchingPreviousPage: fetching === "older",
+    isFetchingNextPage: fetching === "newer",
+    isFetchPreviousPageError: pageError !== null,
+    fetchPreviousPage: useCallback(() => fetchPage("older"), [fetchPage]),
+    fetchNextPage: useCallback(() => fetchPage("newer"), [fetchPage]),
+    setVisibleGroups: useCallback((ids: string[]) => { visible.current = ids; }, []),
+    jumpToLatest,
   };
 }
 

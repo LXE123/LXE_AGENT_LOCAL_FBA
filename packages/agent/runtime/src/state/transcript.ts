@@ -70,7 +70,8 @@ export const normalizeTranscriptMessage = (value: unknown): RuntimeMessage | und
   }
   if (!new Set(["user", "assistant", "tool", "system"]).has(legacyRole)) return undefined;
   let role = legacyRole as RuntimeConversationMessage["role"];
-  if (!Array.isArray(candidate.content)) return { ...environmentMetadata(value), ...anchorMetadata(value), role, content: String(candidate.content ?? "") };
+  const identity = Object.fromEntries(["message_id", "client_message_id"].flatMap((key) => typeof (value as Record<string, unknown>)[key] === "string" ? [[key, (value as Record<string, unknown>)[key]]] : []));
+  if (!Array.isArray(candidate.content)) return { ...identity, ...environmentMetadata(value), ...anchorMetadata(value), role, content: String(candidate.content ?? "") };
   const content = candidate.content.map(normalizeLegacyBlock)
     .filter((block): block is JsonObject => Boolean(block));
   // Early Bun transcripts persisted Anthropic wire messages directly. Recover
@@ -85,7 +86,7 @@ export const normalizeTranscriptMessage = (value: unknown): RuntimeMessage | und
       if (source[key] !== undefined) metadata[key] = source[key];
     }
   }
-  return { ...environmentMetadata(value), ...anchorMetadata(value), ...metadata, role, content } as RuntimeMessage;
+  return { ...identity, ...environmentMetadata(value), ...anchorMetadata(value), ...metadata, role, content } as RuntimeMessage;
 };
 
 export const normalizeTranscriptMessages = (values: unknown[]): RuntimeMessage[] =>

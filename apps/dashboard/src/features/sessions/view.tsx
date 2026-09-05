@@ -40,25 +40,17 @@ import xlsxIcon from "../../assets/file-types/xlsx.png";
 import { EmptyState } from "../../shared/components";
 import { copyTextToClipboard, displayText, isRecord, sanitizeForDisplay, shortText, splitContentBlocks } from "../../shared/content";
 import {
-  buildLiveTimeline,
-  buildConversationItems,
   hasLiveToolOperationDetails,
-  hasReaderFacingText,
   readerFacingMessageText,
   roleLabel,
-  summarizeToolOperations,
   toolOperationArguments,
   toolOperationPresentation,
   toolOperations,
 } from "./conversation";
-import type { LiveTimelineItem, ToolOperation } from "./conversation";
+import type { ToolOperation } from "./conversation";
 import { formatCompactNumber, formatDate, formatDurationMs, formatMessageTime, formatNumber } from "../../shared/format";
 import { useUiText } from "../../shared/i18n";
-import type { UiText } from "../../shared/i18n";
 import type {
-  ConversationResponseGroup,
-  ConversationTimelineItem,
-  ConversationToolGroup,
   DesktopConversationActivityPayload,
   DesktopConversationStreamPayload,
   DesktopConversationTurnPayload,
@@ -68,8 +60,7 @@ import type {
   SessionDetailPayload,
   SessionMessage,
   SessionPayload,
-  SourceSummary,
-  TurnProcessPart
+  SourceSummary
 } from "../../api/payloads";
 import { CodeBlock, languageForPath } from "../../shared/ui/code-block";
 import {
@@ -85,18 +76,13 @@ import {
   modelThinkingLevelLabel,
 } from "../models/model";
 import { groupSidebarSessions } from "./model";
+import { ConversationWindow } from "./virtual-window";
+import { conversationRows, type ConversationRow, type PendingMessage } from "./presentation";
 import { ConversationWelcome } from "./welcome";
 
 /** How close to the bottom still counts as "following the reply". */
-const BOTTOM_PIN_THRESHOLD_PX = 80;
 
-export type PendingConversationMessage = {
-  pendingId: string;
-  sessionId: string;
-  text: string;
-  attachments: DesktopInputAttachmentPayload[];
-  createdAt: number;
-};
+export type PendingConversationMessage = PendingMessage;
 
 function sourceLabel(source: SourceSummary | Record<string, unknown>): string {
   const platform = String(source.platform || "unknown");
@@ -196,48 +182,12 @@ function StatTile({
   );
 }
 
-const TEXT_RENDER_PACE_MS = 24;
-const TEXT_RENDER_IMMEDIATE = 512;
-const TEXT_RENDER_SNAP = /[\s.,!?;:)\]]/;
-
-function pacedTextEnd(text: string, start: number): number {
-  const remaining = text.length - start;
-  const step = remaining <= 12 ? 2 : remaining <= 48 ? 4 : remaining <= 96 ? 8 : Math.min(256, Math.ceil(remaining / 4));
-  const end = Math.min(text.length, start + step);
-  const limit = Math.min(text.length, end + 8);
-  for (let index = end; index < limit; index += 1) {
-    if (TEXT_RENDER_SNAP.test(text[index] ?? "")) return index + 1;
-  }
-  return end;
-}
-
-function usePacedText(text: string, streaming: boolean): string {
-  const [shown, setShown] = useState(() => streaming && text.length > TEXT_RENDER_IMMEDIATE ? "" : text);
-  useEffect(() => {
-    if (!streaming || !text.startsWith(shown) || text.length <= shown.length) {
-      if (shown !== text) setShown(text);
-      return;
-    }
-    if (text.length - shown.length <= TEXT_RENDER_IMMEDIATE) {
-      setShown(text);
-      return;
-    }
-    const timer = window.setTimeout(() => {
-      setShown(text.slice(0, pacedTextEnd(text, shown.length)));
-    }, TEXT_RENDER_PACE_MS);
-    return () => window.clearTimeout(timer);
-  }, [shown, streaming, text]);
-  return streaming ? shown : text;
-}
-
 const MessageMarkdown = React.memo(function MessageMarkdown({
   text,
-  streaming = false,
 }: {
   text: string;
-  streaming?: boolean;
 }) {
-  const visibleText = usePacedText(text, streaming);
+  const visibleText = text;
   return (
     <div className="message-markdown">
       <ReactMarkdown
@@ -515,48 +465,6 @@ function MessageContent({ content, message }: { content: unknown; message: Sessi
   );
 }
 
-function ProcessMessageContent({ message }: { message: SessionMessage }) {
-  const t = useUiText();
-  const content = message.content;
-  if (typeof content === "string") return <MessageMarkdown text={content} />;
-  if (!Array.isArray(content)) {
-    return content === undefined
-      ? null
-      : <pre className="message-json">{shortText(sanitizeForDisplay(content))}</pre>;
-  }
-  return (
-    <div className="process-message-content">
-      {content.map((block, index) => {
-        const type = isRecord(block) ? String(block.type || "") : "";
-        if (type === "thinking") {
-          const thinking = String((block as Record<string, unknown>).thinking || "").trim();
-          return thinking ? <div className="process-thinking-text" key={index}>{thinking}</div> : null;
-        }
-        if (type === "redacted_thinking") {
-          return <div className="process-thinking-text redacted" key={index}>{t.message.redactedThinking}</div>;
-        }
-        if (type === "text" && isRecord(block)) {
-          return <MessageMarkdown key={index} text={String(block.text || "")} />;
-        }
-        return <MessageBlock block={block} key={index} />;
-      })}
-    </div>
-  );
-}
-
-const toolBatchLabels = (t: UiText) => ({
-  actions: t.message.toolActions,
-  more: t.message.toolBatchMore,
-  failures: t.message.toolBatchFailures,
-});
-
-type ToolOperationBody = (operation: ToolOperation) => React.ReactNode;
-
-/**
- * A read hands back file contents, so its result is highlighted as that file's
- * language. Everything else returns prose or a report and stays plain — guessing
- * a grammar for it would only mis-colour it.
- */
 function resultLanguage(operation: ToolOperation): string {
   return operation.action === "read" ? languageForPath(operation.target) : "";
 }
@@ -572,263 +480,6 @@ function defaultToolOperationBody(operation: ToolOperation): React.ReactNode {
           ? <ToolResultBlock block={result} language={resultLanguage(operation)} />
           : <MessageBlock block={result} />}
     </>
-  );
-}
-
-function ToolTurnGroup({
-  group,
-  expanded,
-  embedded = false,
-  onToggle,
-  operations: suppliedOperations,
-  renderOperationBody = defaultToolOperationBody,
-}: {
-  group?: ConversationToolGroup;
-  expanded: boolean;
-  embedded?: boolean;
-  onToggle: () => void;
-  operations?: ToolOperation[];
-  renderOperationBody?: ToolOperationBody;
-}) {
-  const t = useUiText();
-  const historicalOperations = useMemo(
-    () => group ? toolOperations(group.messages) : [],
-    [group],
-  );
-  const operations = suppliedOperations ?? historicalOperations;
-  const summary = summarizeToolOperations(operations, toolBatchLabels(t));
-  const hasError = summary.errorCount > 0;
-  const hasRunning = operations.some((operation) => operation.status === "running");
-  const className = [
-    "tool-turn-group",
-    embedded ? "embedded" : "standalone",
-    hasError ? "has-error" : ""
-  ]
-    .filter(Boolean)
-    .join(" ");
-  // A one-operation batch summarises to exactly the operation's own row, so the
-  // group header would print the same command a second time. The operation row
-  // already carries its own chevron, spinner and error mark.
-  if (operations.length === 1) {
-    return (
-      <section className={`${className} single`}>
-        <ToolOperationList operations={operations} renderOperationBody={renderOperationBody} />
-      </section>
-    );
-  }
-  return (
-    <section className={className}>
-      <button
-        className="tool-turn-summary"
-        type="button"
-        aria-expanded={expanded}
-        onClick={onToggle}
-        title={summary.text}
-      >
-        <span className="tool-turn-title">{summary.text || t.message.toolActivity}</span>
-        {hasRunning ? <LoaderCircle aria-hidden="true" className="conversation-spinner tool-turn-mark" size={13} /> : null}
-        {hasError ? <CircleAlert aria-hidden="true" className="tool-turn-mark" size={13} /> : null}
-        <ChevronRight size={14} className={expanded ? "tool-turn-chevron expanded" : "tool-turn-chevron"} />
-      </button>
-      {expanded ? (
-        <ToolOperationList operations={operations} renderOperationBody={renderOperationBody} />
-      ) : null}
-    </section>
-  );
-}
-
-function ToolOperationList({
-  operations,
-  renderOperationBody,
-}: {
-  operations: ToolOperation[];
-  renderOperationBody: ToolOperationBody;
-}) {
-  const t = useUiText();
-  const [openOperations, setOpenOperations] = useState<Map<string, boolean>>(() => new Map());
-  const isOpen = (operation: ToolOperation): boolean => openOperations.get(operation.key) ?? false;
-  const toggle = (operation: ToolOperation): void => {
-    const next = !isOpen(operation);
-    setOpenOperations((current) => new Map(current).set(operation.key, next));
-  };
-  return (
-    <ul className="tool-op-list">
-      {operations.map((operation) => {
-        const expandable = operation.expandable !== false;
-        const expanded = expandable && isOpen(operation);
-        return (
-          <li className={`tool-op state-${operation.status}`} key={operation.key}>
-            <button
-              aria-expanded={expandable ? expanded : undefined}
-              className="tool-op-summary"
-              disabled={!expandable}
-              onClick={() => toggle(operation)}
-              title={[t.message.toolActions[operation.action], operation.target].filter(Boolean).join(" ")}
-              type="button"
-            >
-              <span className="tool-op-name">{t.message.toolActions[operation.action]}</span>
-              {operation.target ? <span className="tool-op-argument">{operation.target}</span> : null}
-              {operation.status === "running"
-                ? <LoaderCircle aria-hidden="true" className="conversation-spinner tool-op-mark" size={13} />
-                : null}
-              {operation.status === "error"
-                ? <CircleAlert aria-hidden="true" className="tool-op-mark error" size={13} />
-                : null}
-              {operation.status === "success" && !expandable
-                ? <span className="tool-op-status">{t.conversation.completed}</span>
-                : null}
-              {expandable ? (
-                <ChevronRight
-                  aria-hidden="true"
-                  className={expanded ? "tool-op-chevron expanded" : "tool-op-chevron"}
-                  size={14}
-                />
-              ) : null}
-            </button>
-            {expanded ? (
-              <div className="tool-op-body">{renderOperationBody(operation)}</div>
-            ) : null}
-          </li>
-        );
-      })}
-    </ul>
-  );
-}
-
-function ProcessToolGroup({ group }: { group: ConversationToolGroup }) {
-  const [expanded, setExpanded] = useState(false);
-  return (
-    <ToolTurnGroup
-      embedded
-      expanded={expanded}
-      group={group}
-      onToggle={() => setExpanded((current) => !current)}
-    />
-  );
-}
-
-function PersistedTimelineMessage({ item }: {
-  item: Extract<ConversationTimelineItem, { type: "message" }>;
-}) {
-  if (item.presentation === "final") {
-    return (
-      <div className="message-card role-assistant response-final-answer">
-        <MessageContent content={item.message.content} message={item.message} />
-      </div>
-    );
-  }
-  return <ProcessMessageContent message={item.message} />;
-}
-
-function PersistedTimeline({ items }: { items: ConversationTimelineItem[] }) {
-  return (
-    <div className="response-timeline">
-      {items.map((item) => item.type === "tool"
-        ? <ProcessToolGroup group={item.group} key={item.key} />
-        : <PersistedTimelineMessage item={item} key={item.key} />)}
-    </div>
-  );
-}
-
-function responseProcessLabel(group: ConversationResponseGroup, t: UiText): string {
-  const duration = group.turn?.elapsed_ms === null || group.turn?.elapsed_ms === undefined
-    ? ""
-    : t.conversation.elapsedDuration(group.turn.elapsed_ms);
-  switch (group.turn?.status) {
-    case "completed": return duration ? t.conversation.workedFor(duration) : t.conversation.process;
-    case "cancelled": return t.conversation.processCancelled(duration);
-    case "error": return t.conversation.processFailed(duration);
-    default: return t.conversation.process;
-  }
-}
-
-function PersistedResponseGroup({
-  deferMeta = false,
-  group,
-}: {
-  deferMeta?: boolean;
-  group: ConversationResponseGroup;
-}) {
-  const t = useUiText();
-  const failed = group.turn?.status === "error";
-  const hasProcess = group.timeline.some((item) => item.type === "tool" || item.presentation === "process");
-  return (
-    <div className={`response-group${failed ? " has-error" : ""}`} data-turn-id={group.turn?.turn_id}>
-      {hasProcess || group.turn ? (
-        <div className="response-status">
-          {failed ? <CircleAlert aria-hidden="true" size={14} /> : null}
-          <span>{responseProcessLabel(group, t)}</span>
-        </div>
-      ) : null}
-      <div className="message-with-meta role-assistant response-timeline-with-meta">
-        <PersistedTimeline items={group.timeline} />
-        {!deferMeta && group.metadataMessage ? (
-          <MessageMeta
-            createdAt={Number(group.metadataMessage.created_at ?? 0)}
-            role="assistant"
-            text={readerFacingMessageText(group.metadataMessage)}
-          />
-        ) : null}
-      </div>
-    </div>
-  );
-}
-
-/**
- * An optimistic card is redundant once the transcript on screen was fetched at
- * or after the runtime persisted that part of the turn. Comparing watermarks
- * rather than message text keeps this working when the runtime rewrites the
- * stored text (system-event prefixes, sanitisation); a `0` watermark means the
- * transcript never received it, so the card must stay.
- */
-function transcriptCaughtUp(watermark: number, transcriptFetchedAt: number): boolean {
-  return watermark > 0 && transcriptFetchedAt >= watermark;
-}
-
-function liveProgressLabel(
-  stream: DesktopConversationStreamPayload | undefined,
-  turnState: DesktopConversationTurnPayload["state"],
-  t: UiText,
-): string {
-  if (turnState === "stopping") return t.conversation.stopping;
-  if (turnState === "cancelled" || stream?.display_metrics.status === "cancelled") return t.conversation.cancelled;
-  if (turnState === "error" || stream?.display_metrics.status === "error") return t.conversation.error;
-  if (turnState === "completed" || stream?.display_metrics.status === "completed") return t.conversation.completed;
-  if (!stream) return t.conversation.preparingContext;
-  switch (stream.display_metrics.phase) {
-    case "preparing_context": return t.conversation.preparingContext;
-    case "waiting_model": return t.conversation.waitingModel;
-    case "thinking": return t.conversation.thinking;
-    case "running_tool": return t.conversation.runningTool;
-    case "generating_answer": return t.conversation.generatingAnswer;
-  }
-}
-
-function LiveProgressStatus({
-  elapsedMs,
-  label,
-  state,
-}: {
-  elapsedMs: number;
-  label: string;
-  state: DesktopConversationTurnPayload["state"];
-}) {
-  const active = state === "running" || state === "stopping";
-  const failed = state === "error";
-  return (
-    <div
-      aria-live={failed ? "assertive" : "polite"}
-      className={`live-progress-status state-${state}`}
-    >
-      {active ? <LoaderCircle aria-hidden="true" className="conversation-spinner" size={13} /> : null}
-      <span className="live-progress-label">{label}</span>
-      {active && elapsedMs >= 1_000 ? (
-        <>
-          <span aria-hidden="true" className="live-progress-separator">·</span>
-          <span aria-hidden="true" className="live-progress-elapsed">{formatDurationMs(elapsedMs)}</span>
-        </>
-      ) : null}
-    </div>
   );
 }
 
@@ -864,120 +515,6 @@ function LiveToolOperationBody({ operation }: { operation: ToolOperation }) {
         <ToolResultBlock block={{ type: "tool_result", content: step.error_block.content, is_error: true }} />
       ) : null}
     </>
-  );
-}
-
-function LiveToolItem({ step }: { step: LiveToolStep }) {
-  const operations = useMemo(() => liveToolOperations([step]), [step]);
-  return (
-    <ToolTurnGroup
-      embedded
-      expanded={false}
-      operations={operations}
-      onToggle={() => undefined}
-      renderOperationBody={(operation) => <LiveToolOperationBody operation={operation} />}
-    />
-  );
-}
-
-const LiveThinkingPart = React.memo(function LiveThinkingPart({
-  part,
-}: {
-  part: Extract<TurnProcessPart, { type: "thinking" }>;
-}) {
-  const t = useUiText();
-  const text = usePacedText(part.text, part.status === "streaming");
-  return (
-    <div className="process-message-content">
-      {part.status === "error" ? <div className="process-thinking-text">{t.conversation.error}</div> : null}
-      {text ? <div className="process-thinking-text">{text}</div> : null}
-      {Array.from({ length: part.redacted_count }, (_, index) => (
-        <div className="process-thinking-text redacted" key={index}>{t.message.redactedThinking}</div>
-      ))}
-    </div>
-  );
-});
-
-const LiveTextPart = React.memo(function LiveTextPart({
-  part,
-  presentation,
-}: {
-  part: Extract<TurnProcessPart, { type: "text" }>;
-  presentation: LiveTimelineItem["presentation"];
-}) {
-  const t = useUiText();
-  const className = presentation === "final"
-    ? "timeline-text message-card role-assistant response-final-answer"
-    : "timeline-text process-message-content";
-  return (
-    <div className={className}>
-      {part.status === "error" ? <div className="process-thinking-text">{t.conversation.error}</div> : null}
-      <MessageMarkdown streaming={part.status === "streaming"} text={part.text} />
-    </div>
-  );
-});
-
-function LiveTimeline({ items, parts }: { items: LiveTimelineItem[]; parts: TurnProcessPart[] }) {
-  const partById = new Map(parts.map((part) => [part.part_id, part]));
-  return (
-    <div className="response-timeline">
-      {items.map((item) => {
-        const part = partById.get(item.partId);
-        if (!part) return null;
-        if (part.type === "tool") return <LiveToolItem key={item.key} step={part.tool_step} />;
-        if (part.type === "thinking") return <LiveThinkingPart key={item.key} part={part} />;
-        return <LiveTextPart key={item.key} part={part} presentation={item.presentation} />;
-      })}
-    </div>
-  );
-}
-
-function LiveResponseGroup({
-  elapsedMs,
-  hasElapsed,
-  settledAt,
-  stream,
-  turnState,
-}: {
-  elapsedMs: number;
-  hasElapsed: boolean;
-  settledAt: number;
-  stream?: DesktopConversationStreamPayload;
-  turnState: DesktopConversationTurnPayload["state"];
-}) {
-  const t = useUiText();
-  const streamStatus = stream?.display_metrics.status;
-  const displayState = streamStatus && streamStatus !== "running" ? streamStatus : turnState;
-  const duration = hasElapsed ? t.conversation.elapsedDuration(elapsedMs) : "";
-  const label = displayState === "completed"
-    ? (duration ? t.conversation.workedFor(duration) : t.conversation.process)
-    : displayState === "cancelled"
-      ? t.conversation.processCancelled(duration)
-      : displayState === "error"
-        ? t.conversation.processFailed(duration)
-        : liveProgressLabel(stream, turnState, t);
-  const processParts = stream?.process_parts ?? [];
-  const timeline = useMemo(
-    () => buildLiveTimeline(processParts, stream?.display_metrics.phase),
-    [processParts, stream?.display_metrics.phase],
-  );
-  const partById = new Map(processParts.map((part) => [part.part_id, part]));
-  const finalParts = timeline.flatMap((item) => {
-    const part = partById.get(item.partId);
-    return item.presentation === "final" && part?.type === "text" ? [part] : [];
-  });
-  const finalText = finalParts.map((part) => part.text).join("");
-  const finalStreaming = finalParts.some((part) => part.status === "streaming");
-  return (
-    <div className={`response-group live-response-group state-${displayState}`}>
-      <LiveProgressStatus elapsedMs={elapsedMs} label={label} state={displayState} />
-      <div className="message-with-meta role-assistant response-timeline-with-meta">
-        {timeline.length ? <LiveTimeline items={timeline} parts={processParts} /> : null}
-        {displayState === "completed" && finalText && !finalStreaming ? (
-          <MessageMeta createdAt={settledAt / 1000} role="assistant" text={finalText} />
-        ) : null}
-      </div>
-    </div>
   );
 }
 
@@ -1139,75 +676,6 @@ function InputAttachmentList({
         </span>
       ))}
       {error ? <div className="turn-file-error" role="alert">{t.conversation.openFileFailed(error)}</div> : null}
-    </div>
-  );
-}
-
-function LocalTurnCards({
-  persistedResponse,
-  turn,
-  transcriptFetchedAt,
-}: {
-  persistedResponse: boolean;
-  turn: DesktopConversationTurnPayload;
-  transcriptFetchedAt: number;
-}) {
-  const t = useUiText();
-  const ticking = turn.started_at > 0 && (turn.state === "running" || turn.state === "stopping");
-  const [clock, setClock] = useState(() => Date.now());
-  useEffect(() => {
-    setClock(Date.now());
-    if (!ticking) return;
-    const timer = window.setInterval(() => setClock(Date.now()), 250);
-    return () => window.clearInterval(timer);
-  }, [ticking, turn.started_at]);
-  const elapsedEnd = ticking ? clock : turn.settled_at || clock;
-  const elapsedMs = turn.started_at > 0 ? Math.max(0, elapsedEnd - turn.started_at) : 0;
-  const userPersisted = transcriptCaughtUp(turn.user_persisted_at, transcriptFetchedAt);
-  const assistantPersisted = persistedResponse && transcriptCaughtUp(turn.settled_at, transcriptFetchedAt);
-  const statusLabel = turn.state === "queued"
-    ? t.conversation.queued
-    : turn.state === "completed"
-      ? t.conversation.completed
-      : turn.state === "cancelled"
-        ? t.conversation.cancelled
-        : turn.state === "error"
-          ? t.conversation.error
-          : turn.state === "stopping" ? t.conversation.stopping : t.conversation.running;
-  const stateBadge = <span className={`conversation-turn-state state-${turn.state}`}>{statusLabel}</span>;
-  // The badge outlives the optimistic card so a cancelled or failed turn keeps
-  // saying so after the transcript catches up and the card is dropped.
-  const showStandaloneBadge = userPersisted
-    && !persistedResponse
-    && (turn.state === "queued" || turn.state === "cancelled" || turn.state === "error");
-  return (
-    <div className="local-turn" data-turn-id={turn.turn_id}>
-      {!userPersisted ? (
-        <div className="message-with-meta role-user">
-          <article className={turn.attachments?.length
-            ? "message-card role-user optimistic-message has-attachments"
-            : "message-card role-user optimistic-message"}>
-            {turn.text ? <MessageMarkdown text={turn.text} /> : null}
-            {turn.attachments?.length ? (
-              <InputAttachmentList attachments={turn.attachments} />
-            ) : null}
-            {!turn.stream ? <div className="optimistic-message-state">{stateBadge}</div> : null}
-          </article>
-          <MessageMeta createdAt={Number(turn.created_at ?? 0) / 1000} role="user" text={turn.text} />
-        </div>
-      ) : null}
-      {!assistantPersisted && (turn.stream || (userPersisted && (turn.state === "running" || turn.state === "stopping"))) ? (
-        <LiveResponseGroup
-          elapsedMs={elapsedMs}
-          hasElapsed={turn.started_at > 0}
-          settledAt={turn.settled_at}
-          stream={turn.stream}
-          turnState={turn.state}
-        />
-      ) : null}
-      {showStandaloneBadge && (!turn.stream || assistantPersisted) ? (
-        <div className="conversation-turn-state-row">{stateBadge}</div>
-      ) : null}
     </div>
   );
 }
@@ -1906,6 +1374,49 @@ function ConversationComposer({
   );
 }
 
+export const UnifiedConversationRow = React.memo(function UnifiedConversationRow({ row, expanded, onToggle, onOpenFile, onRevealFile, onOpenAttachment }: {
+  row: ConversationRow; expanded: boolean; onToggle: (id: string) => void;
+  onOpenFile: (id: string) => Promise<void>; onRevealFile: (id: string) => Promise<void>; onOpenAttachment: (id: string) => Promise<void>;
+}) {
+  const t = useUiText();
+  const stateLabel = row.status === "error" ? t.conversation.error : row.status === "cancelled" ? t.conversation.cancelled
+    : row.status === "completed" ? t.conversation.completed : row.status === "queued" ? t.conversation.queued : t.conversation.running;
+  if (row.kind === "status") return <div className="conversation-turn-state-row"><span className={`conversation-turn-state state-${row.status}`}>{stateLabel}</span></div>;
+  if (row.kind === "artifacts") return <TurnFileList files={row.artifacts ?? []} onOpenFile={onOpenFile} onRevealFile={onRevealFile} />;
+  if (row.kind === "tool") {
+    const operation = row.operation ?? (row.liveTool ? liveToolOperations([row.liveTool])[0] : undefined);
+    if (!operation) return null;
+    return <section className="tool-turn-group embedded single"><ul className="tool-op-list"><li className={`tool-op state-${operation.status}`}>
+      <button className="tool-op-summary" type="button" aria-expanded={expanded} onClick={() => onToggle(row.id)}>
+        <span className="tool-op-name">{t.message.toolActions[operation.action]}</span><span className="tool-op-argument">{operation.target}</span>
+        {operation.status === "running" ? <LoaderCircle className="conversation-spinner" size={13} /> : null}
+        {operation.status === "error" ? <CircleAlert size={13} /> : null}<ChevronRight className={expanded ? "tool-op-chevron expanded" : "tool-op-chevron"} size={14} />
+      </button>
+      {expanded ? <div className="tool-op-body">{row.operation ? defaultToolOperationBody(operation) : <LiveToolOperationBody operation={operation} />}</div> : null}
+    </li></ul></section>;
+  }
+  const message = row.message!;
+  const blocks = Array.isArray(message.content) ? message.content : [];
+  const thinking = blocks.length === 1 && isRecord(blocks[0]) && ["thinking", "redacted_thinking"].includes(String(blocks[0].type)) ? blocks[0] : undefined;
+  if (thinking) return <div className="message-block thinking-block">
+    <button className="block-title thinking-block-toggle" type="button" aria-expanded={expanded} onClick={() => onToggle(row.id)}><Brain size={14} />{t.message.thinking}</button>
+    {expanded ? <div className="thinking-block-body"><div className="message-text">{String(thinking.thinking ?? "")}</div>{thinking.redacted || thinking.type === "redacted_thinking" ? <RedactedThinkingBlock /> : null}</div> : null}
+    {row.status === "error" ? <div role="status">{stateLabel}</div> : null}
+  </div>;
+  if (message.role !== "user" && message.role !== "assistant") return <article className="message-card role-system"><RoleBadge role={message.role} /><MessageContent content={message.content} message={message} /></article>;
+  const role = message.role;
+  return <div className={`message-with-meta role-${role}`}>
+    <article className={`message-card role-${role}${message.attachments?.length ? " has-attachments" : ""}`}>
+      <MessageContent content={message.content} message={message} />
+      {message.attachments?.length ? <InputAttachmentList attachments={message.attachments} onOpen={onOpenAttachment} /> : null}
+      {row.error ? <div role="alert">{row.error}</div> : row.status === "error" ? <div role="status">{stateLabel}</div> : null}
+      {role === "user" && ["sending", "queued"].includes(row.status ?? "") ? <div className="optimistic-message-state">{stateLabel}</div> : null}
+    </article>
+    <MessageMeta createdAt={Number(message.created_at ?? row.createdAt / 1000)} role={role} text={readerFacingMessageText(message)} />
+  </div>;
+}, (a, b) => a.expanded === b.expanded && a.onToggle === b.onToggle && a.onOpenFile === b.onOpenFile
+  && a.onRevealFile === b.onRevealFile && a.onOpenAttachment === b.onOpenAttachment && JSON.stringify(a.row) === JSON.stringify(b.row));
+
 export function SessionDetailView({
   fallbackSession,
   detail,
@@ -1918,13 +1429,13 @@ export function SessionDetailView({
   newConversation,
   runtimeReady,
   runtimeUnavailableMessage,
-  transcriptFetchedAt,
   loading,
   error,
   hasOlder,
   loadingOlder,
   loadOlderError,
   onLoadOlder,
+  hasNewer = false, onLoadNewer = async () => undefined, onJumpToLatest = () => {}, onVisibleGroups = () => {},
   onModelChange,
   onThinkingLevelChange,
   onSend,
@@ -1945,13 +1456,16 @@ export function SessionDetailView({
   newConversation: boolean;
   runtimeReady: boolean;
   runtimeUnavailableMessage: string;
-  transcriptFetchedAt: number;
   loading: boolean;
   error: string;
   hasOlder: boolean;
   loadingOlder: boolean;
   loadOlderError: string;
   onLoadOlder: () => Promise<SessionDetailPayload | undefined>;
+  hasNewer?: boolean;
+  onLoadNewer?: () => Promise<SessionDetailPayload | undefined>;
+  onJumpToLatest?: () => void;
+  onVisibleGroups?: (groups: string[]) => void;
   onModelChange: (provider: string, model: string, credentialSource: "local" | "cloud") => void;
   onThinkingLevelChange: (level: string) => void;
   onSend: (text: string, attachments: DesktopInputAttachmentPayload[]) => Promise<void>;
@@ -1964,60 +1478,42 @@ export function SessionDetailView({
   const t = useUiText();
   const session = detail?.session || fallbackSession;
   const messages = detail?.messages || [];
-  const allRenderItems = useMemo(() => buildConversationItems(messages), [messages]);
   const [sessionInfoOpen, setSessionInfoOpen] = useState(false);
   const closeSessionInfo = () => setSessionInfoOpen(false);
   const sessionInfoRef = useDialogFocus<HTMLElement>(sessionInfoOpen, closeSessionInfo);
-  // Only the groups the reader has explicitly toggled; everything else follows
-  // the default, which opens a group that contains an error.
-  const [toolGroupOverrides, setToolGroupOverrides] = useState<Map<string, boolean>>(() => new Map());
-  const transcriptRef = useRef<HTMLDivElement>(null);
-  const olderSentinelRef = useRef<HTMLDivElement>(null);
-  const loadingOlderRef = useRef(false);
-  const [pinnedToBottom, setPinnedToBottom] = useState(true);
-  const liveTurns = [...new Map(
-    [activity?.latest, activity?.active, ...(activity?.queued ?? [])]
-      .filter((turn): turn is DesktopConversationTurnPayload => Boolean(turn))
-      .map((turn) => [turn.turn_id, turn]),
-  ).values()];
-  const persistedResponseTurnIds = new Set(allRenderItems
-    .filter((item): item is Extract<(typeof allRenderItems)[number], { type: "response_group" }> =>
-      item.type === "response_group" && Boolean(item.group.turn?.turn_id))
-    .map((item) => item.group.turn!.turn_id));
-  const liveOwnedTurnIds = new Set(liveTurns
-    .filter((turn) => (turn.stream || turn.state === "running" || turn.state === "stopping")
-      && !transcriptCaughtUp(turn.settled_at, transcriptFetchedAt))
-    .map((turn) => turn.turn_id));
-  const liveArtifactGroups = new Map(allRenderItems
-    .filter((item): item is Extract<(typeof allRenderItems)[number], { type: "artifact_group" }> =>
-      item.type === "artifact_group" && liveOwnedTurnIds.has(item.group.turnId))
-    .map((item) => [item.group.turnId, item.group]));
-  const renderItems = allRenderItems.filter((item) => {
-    if (item.type === "response_group" && item.group.turn?.turn_id) {
-      return !liveOwnedTurnIds.has(item.group.turn.turn_id);
+  const memory = useRef<{ session: string; turns: Map<string, DesktopConversationTurnPayload> }>({ session: "", turns: new Map() });
+  const sessionKey = session?.session_id ?? "new";
+  if (memory.current.session !== sessionKey) memory.current = { session: sessionKey, turns: new Map() };
+  for (const turn of [activity?.latest, activity?.active, ...(activity?.queued ?? [])]) {
+    if (turn) memory.current.turns.set(turn.turn_id, turn);
+  }
+  const persistedTurns = new Set(messages.flatMap((message) => message.turn ? [message.turn.turn_id] : []));
+  const durableIds = new Set(messages.flatMap((message) => Array.isArray(message.content) ? message.content.flatMap((block, index) => {
+    if (!isRecord(block)) return [];
+    return [block.type === "tool_call" || block.type === "tool_use" ? `tool:${block.id}` : `${message.id || message.display_id}:${index}`];
+  }) : []));
+  for (const [id, turn] of memory.current.turns) {
+    if (["running", "stopping", "queued"].includes(turn.state)) continue;
+    if (!persistedTurns.has(id)) {
+      if (turn !== activity?.latest && !pendingMessages.some((item) => item.turnId === id)) memory.current.turns.delete(id);
+      continue;
     }
-    if (item.type === "artifact_group") return !liveOwnedTurnIds.has(item.group.turnId);
-    return true;
-  });
-  const scrollToLatest = () => {
-    const transcript = transcriptRef.current;
-    if (!transcript) return;
-    // Moving this container's own scrollTop, rather than scrollIntoView, keeps
-    // the surrounding page where the user left it.
-    transcript.scrollTop = transcript.scrollHeight;
-    setPinnedToBottom(true);
-  };
-  useEffect(() => {
-    setSessionInfoOpen(false);
-    setPinnedToBottom(true);
-  }, [session?.session_id]);
-  useEffect(() => {
-    // Following every delta would fight anyone reading back through the turn,
-    // so only stay glued to the bottom when that is already where they are.
-    if (loadingOlderRef.current || !pinnedToBottom) return;
-    const frame = window.requestAnimationFrame(scrollToLatest);
-    return () => window.cancelAnimationFrame(frame);
-  }, [activity?.active?.stream?.seq, activity?.queued.length, detail?.messages.length, pendingMessages.length, pinnedToBottom]);
+    if (turn.stream) {
+      // Keep ordering and failed-attempt text, but release duplicate successful payloads.
+      const parts = turn.stream.process_parts.map((part) => durableIds.has(part.type === "tool" ? `tool:${part.tool_step.id}` : part.part_id)
+        ? part.type === "tool" ? { ...part, tool_step: { ...part.tool_step, result_block: undefined, error_block: undefined } }
+          : { ...part, text: "" }
+        : part);
+      memory.current.turns.set(id, { ...turn, stream: { ...turn.stream, content: "", thinking: "", tool_steps: [], process_parts: parts } });
+    }
+  }
+  const turns = hasNewer ? [] : [...memory.current.turns.values()].filter((turn) =>
+    persistedTurns.has(turn.turn_id) || turn.turn_id === activity?.active?.turn_id || turn.turn_id === activity?.latest?.turn_id || activity?.queued.some((entry) => entry.turn_id === turn.turn_id)
+    || pendingMessages.some((item) => item.turnId === turn.turn_id));
+  const rows = conversationRows(messages, turns, hasNewer ? [] : pendingMessages);
+  const [expandedRows, setExpandedRows] = useState<Map<string, boolean>>(() => new Map());
+  useEffect(() => { setExpandedRows(new Map()); setSessionInfoOpen(false); }, [sessionKey]);
+  const toggleRow = useCallback((id: string) => setExpandedRows((current) => new Map(current).set(id, !current.get(id))), []);
   const detailItems = session ? [
     { label: t.sessionDetail.sessionId, value: session.session_id, mono: true },
     { label: t.sessionDetail.source, value: sourceLabel(session.source_summary || session.source) },
@@ -2030,48 +1526,6 @@ export function SessionDetailView({
     { label: t.stats.tokens, value: formatNumber(session.input_tokens + session.output_tokens) },
     { label: t.stats.apiCalls, value: formatNumber(session.api_call_count) },
   ] : [];
-  const toolGroupExpanded = (group: ConversationToolGroup): boolean =>
-    toolGroupOverrides.get(group.key) ?? false;
-  const toggleToolGroup = (group: ConversationToolGroup) => {
-    const next = !toolGroupExpanded(group);
-    setToolGroupOverrides((current) => new Map(current).set(group.key, next));
-  };
-  const loadOlder = useCallback(async () => {
-    if (loadingOlderRef.current) return;
-    const transcript = transcriptRef.current;
-    const previousHeight = transcript?.scrollHeight ?? 0;
-    const previousTop = transcript?.scrollTop ?? 0;
-    loadingOlderRef.current = true;
-    try {
-      const earlier = await onLoadOlder();
-      window.requestAnimationFrame(() => {
-        if (transcript) transcript.scrollTop = previousTop + transcript.scrollHeight - previousHeight;
-        loadingOlderRef.current = false;
-        if (transcript && earlier?.messages_page.has_previous && transcript.scrollTop <= 120) void loadOlder();
-      });
-    } catch {
-      loadingOlderRef.current = false;
-    }
-  }, [onLoadOlder]);
-  useEffect(() => {
-    const root = transcriptRef.current;
-    const target = olderSentinelRef.current;
-    if (!root || !target || !hasOlder || loadingOlder || loadOlderError) return;
-    const observer = new IntersectionObserver((entries) => {
-      if (entries.some((entry) => entry.isIntersecting)) void loadOlder();
-    }, { root, rootMargin: "120px 0px 0px 0px" });
-    observer.observe(target);
-    return () => observer.disconnect();
-  }, [hasOlder, loadOlder, loadOlderError, loadingOlder]);
-  const handleTranscriptScroll = () => {
-    const transcript = transcriptRef.current;
-    if (!transcript || loadingOlderRef.current) return;
-    const distanceFromBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight;
-    setPinnedToBottom(distanceFromBottom <= BOTTOM_PIN_THRESHOLD_PX);
-  };
-  const showEmpty = !loading && !error && !messages.length && !liveTurns.length && !pendingMessages.length;
-  const showJumpToLatest = !pinnedToBottom
-    && (Boolean(messages.length) || Boolean(liveTurns.length) || Boolean(pendingMessages.length));
   const title = newConversation ? t.conversation.newTitle : session?.title || t.sessions.title;
   return (
     <div className="session-detail conversation-view">
@@ -2139,177 +1593,11 @@ export function SessionDetailView({
       {loading ? <EmptyState label={t.sessionDetail.loading} /> : null}
       {error ? <EmptyState label={t.common.errorPrefix(t.sessionDetail.errorLabel, error)} /> : null}
       {!loading && !error ? (
-        <div className="conversation-scroll-area">
-          <div className="conversation-transcript" onScroll={handleTranscriptScroll} ref={transcriptRef}>
-            <div className={showEmpty ? "conversation-feed is-empty" : "conversation-feed"}>
-              <div className="conversation-history-sentinel" ref={olderSentinelRef}>
-                {loadingOlder ? (
-                  <span aria-live="polite" className="conversation-history-loading">
-                    <LoaderCircle className="conversation-spinner" size={14} />
-                    {t.sessionDetail.loadingEarlier}
-                  </span>
-                ) : null}
-                {loadOlderError ? (
-                  <div className="message-page-error" role="alert">
-                    <span>{loadOlderError}</span>
-                    <button className="conversation-load-earlier" onClick={() => void loadOlder()} type="button">
-                      {t.sessionDetail.retryEarlier}
-                    </button>
-                  </div>
-                ) : null}
-              </div>
-              {messages.length ? (
-                <div className="message-list">
-                  {renderItems.map((item, itemIndex) => {
-                    if (item.type === "artifact_group") {
-                      const previous = renderItems[itemIndex - 1];
-                      const metadataMessage = previous?.type === "response_group"
-                        && previous.group.turn?.turn_id === item.group.turnId
-                        ? previous.group.metadataMessage
-                        : undefined;
-                      return (
-                        <div className="turn-artifacts-with-meta" key={item.group.key}>
-                          <TurnFileList files={item.group.files}
-                            onOpenFile={onOpenFile} onRevealFile={onRevealFile} />
-                          {metadataMessage ? (
-                            <MessageMeta
-                              createdAt={Number(metadataMessage.created_at ?? 0)}
-                              role="assistant"
-                              text={readerFacingMessageText(metadataMessage)}
-                            />
-                          ) : null}
-                        </div>
-                      );
-                    }
-                    if (item.type === "response_group") {
-                      const next = renderItems[itemIndex + 1];
-                      const deferMeta = next?.type === "artifact_group"
-                        && next.group.turnId === item.group.turn?.turn_id;
-                      return <PersistedResponseGroup deferMeta={deferMeta}
-                        group={item.group} key={item.group.key} />;
-                    }
-                    if (item.type === "tool_group") {
-                      return <ToolTurnGroup expanded={toolGroupExpanded(item.group)} group={item.group}
-                        key={item.group.key}
-                        onToggle={() => toggleToolGroup(item.group)} />;
-                    }
-                    const { message, index, toolGroups } = item;
-                    const role = roleLabel(message.role);
-                    // A step that only thought and called a tool gets no card,
-                    // no role badge: it reads as one line of process, and the
-                    // thinking stays where it happened instead of being swept
-                    // into the tool group beside it.
-                    if (role === "assistant" && !hasReaderFacingText(message)) {
-                      return (
-                        <div className="process-step" key={`process-${index}`}>
-                          <MessageContent content={message.content} message={message} />
-                          {toolGroups.map((group) => <ToolTurnGroup embedded expanded={toolGroupExpanded(group)}
-                            group={group} key={group.key}
-                            onToggle={() => toggleToolGroup(group)} />)}
-                        </div>
-                      );
-                    }
-                    const previousItem = renderItems[itemIndex - 1];
-                    const nextItem = renderItems[itemIndex + 1];
-                    const isAssistantReply = (candidate: typeof previousItem): boolean =>
-                      candidate?.type === "message"
-                      && roleLabel(candidate.message.role) === "assistant"
-                      && hasReaderFacingText(candidate.message);
-                    const previousIsAssistant = isAssistantReply(previousItem);
-                    const nextIsAssistant = isAssistantReply(nextItem);
-                    const showRoleBadge = role !== "assistant" && role !== "user";
-                    const hasMessageHeader = showRoleBadge || Boolean(message.tool_name || message.tool_call_id);
-                    const chainClass = role === "assistant"
-                      ? [previousIsAssistant ? "assistant-chain-from-previous" : "", nextIsAssistant ? "assistant-chain-to-next" : ""]
-                        .filter(Boolean).join(" ")
-                      : "";
-                    const attachmentClass = message.attachments?.length ? "has-attachments" : "";
-                    const messageCard = (
-                      <article className={`message-card role-${role} ${chainClass} ${attachmentClass}`}>
-                        {hasMessageHeader ? (
-                          <div className="message-header">
-                            {showRoleBadge ? <RoleBadge role={role} /> : null}
-                            {message.tool_name ? <span className="muted">{message.tool_name}</span> : null}
-                            {message.tool_call_id ? <code>{message.tool_call_id}</code> : null}
-                          </div>
-                        ) : null}
-                        <MessageContent content={message.content} message={message} />
-                        {message.attachments?.length ? (
-                          <InputAttachmentList attachments={message.attachments} onOpen={onOpenAttachment} />
-                        ) : null}
-                      </article>
-                    );
-                    const messageWithMeta = role === "assistant" || role === "user" ? (
-                      <div className={`message-with-meta role-${role}`}>
-                        {messageCard}
-                        <MessageMeta
-                          createdAt={Number(message.created_at ?? 0)}
-                          role={role}
-                          text={readerFacingMessageText(message)}
-                        />
-                      </div>
-                    ) : messageCard;
-                    // Tool activity sits beside the reply, never inside it, so a
-                    // group is always read at the same level wherever it occurs.
-                    return (
-                      <React.Fragment key={`${role}-${index}`}>
-                        {messageWithMeta}
-                        {toolGroups.length ? (
-                          <div className="process-step">
-                            {toolGroups.map((group) => <ToolTurnGroup embedded expanded={toolGroupExpanded(group)}
-                              group={group} key={group.key}
-                              onToggle={() => toggleToolGroup(group)} />)}
-                          </div>
-                        ) : null}
-                      </React.Fragment>
-                    );
-                  })}
-                </div>
-              ) : null}
-              {pendingMessages.map((message) => (
-                <div className="local-turn pending-local-turn" key={message.pendingId}>
-                  <div className="message-with-meta role-user">
-                    <article className={message.attachments.length
-                      ? "message-card role-user optimistic-message has-attachments"
-                      : "message-card role-user optimistic-message"}>
-                      {message.text ? <MessageMarkdown text={message.text} /> : null}
-                      {message.attachments.length ? (
-                        <InputAttachmentList attachments={message.attachments} />
-                      ) : null}
-                    </article>
-                    <MessageMeta createdAt={message.createdAt / 1000} role="user" text={message.text} />
-                  </div>
-                </div>
-              ))}
-              {liveTurns.map((turn) => (
-                <React.Fragment key={turn.turn_id}>
-                  <LocalTurnCards
-                    persistedResponse={persistedResponseTurnIds.has(turn.turn_id)}
-                    transcriptFetchedAt={transcriptFetchedAt}
-                    turn={turn}
-                  />
-                  {liveArtifactGroups.get(turn.turn_id) ? (
-                    <TurnFileList
-                      files={liveArtifactGroups.get(turn.turn_id)!.files}
-                      onOpenFile={onOpenFile}
-                      onRevealFile={onRevealFile}
-                    />
-                  ) : null}
-                </React.Fragment>
-              ))}
-              {showEmpty && !newConversation ? (
-                <EmptyState label={t.sessionDetail.empty} />
-              ) : null}
-              {newConversation && showEmpty ? <ConversationWelcome /> : null}
-            </div>
-          </div>
-          {showJumpToLatest ? (
-            <button className="conversation-jump-latest" onClick={scrollToLatest} type="button">
-              <ChevronDown size={14} />
-              <span>{t.conversation.jumpToLatest}</span>
-            </button>
-          ) : null}
-        </div>
+        <ConversationWindow key={sessionKey} rows={rows} hasOlder={hasOlder} hasNewer={hasNewer}
+          loadOlder={onLoadOlder} loadNewer={onLoadNewer} jumpToLatest={onJumpToLatest} onVisibleGroups={onVisibleGroups}
+          pageError={loadOlderError} empty={newConversation ? <ConversationWelcome /> : <EmptyState label={t.sessionDetail.empty} />}
+          renderRow={(row) => <UnifiedConversationRow row={row} expanded={expandedRows.get(row.id) ?? false} onToggle={toggleRow}
+            onOpenFile={onOpenFile} onRevealFile={onRevealFile} onOpenAttachment={onOpenAttachment} />} />
       ) : null}
       <div className="conversation-composer-dock">
         <ConversationComposer

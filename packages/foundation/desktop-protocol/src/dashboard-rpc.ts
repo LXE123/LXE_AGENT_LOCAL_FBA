@@ -81,6 +81,10 @@ export type SessionPayload = {
 
 export type SessionMessage = {
   display_group_id: string;
+  display_id?: string;
+  client_message_id?: string;
+  message_id?: string;
+  source_reason?: string;
   role: string;
   /** Epoch seconds from the immutable transcript event. */
   created_at?: number;
@@ -130,6 +134,9 @@ export type MessagesPagePayload = {
   newest_cursor: string | null;
   previous_cursor: string | null;
   has_previous: boolean;
+  next_cursor?: string | null;
+  has_next?: boolean;
+  group_cursors?: string[];
 };
 
 export type SessionDetailPayload = {
@@ -160,15 +167,11 @@ export type DesktopConversationStreamPayload = {
   display_metrics: DisplayMetrics;
 };
 
-/**
- * Transcript watermarks in epoch milliseconds; 0 means "not reached yet".
- * The renderer drops an optimistic card once its transcript snapshot was
- * fetched at or after the matching watermark, so nothing depends on message
- * text surviving the runtime's system-event prefixing untouched.
- */
+/** Persistence timestamps are informational; display handoff uses message identity. */
 export type DesktopConversationTurnPayload = {
   turn_id: string;
   message_id: string;
+  client_message_id?: string;
   text: string;
   attachments?: DesktopInputAttachmentPayload[];
   state: DesktopConversationTurnState;
@@ -208,6 +211,7 @@ export type DesktopConversationSendPayload = {
   session_id: string;
   turn_id: string;
   message_id: string;
+  client_message_id?: string;
   created: boolean;
   state: "running" | "queued";
 };
@@ -449,7 +453,7 @@ export interface DashboardRpcSpec {
     result: SessionListPayload;
   };
   "sessions.detail": {
-    input: { session_id: string; message_limit?: number; message_before?: string };
+    input: { session_id: string; message_limit?: number; message_before?: string; message_after?: string };
     result: SessionDetailPayload;
   };
   "sessions.pin": {
@@ -461,7 +465,7 @@ export interface DashboardRpcSpec {
     result: { session_id: string; deleted: true };
   };
   "sessions.send": {
-    input: { session_id?: string; text: string; attachment_ids?: string[] };
+    input: { session_id?: string; text: string; attachment_ids?: string[]; client_message_id?: string };
     result: DesktopConversationSendPayload;
   };
   "sessions.stop": {
@@ -659,12 +663,15 @@ export function parseDashboardRpcCall(value: unknown): DashboardRpcCall {
         offset: integerValue(input.offset, `${operation}.offset`, 0, 0, Number.MAX_SAFE_INTEGER),
       } };
     case "sessions.detail": {
-      exactKeys(input, ["session_id", "message_limit", "message_before"], `${operation}.input`);
+      exactKeys(input, ["session_id", "message_limit", "message_before", "message_after"], `${operation}.input`);
+      if (input.message_before !== undefined && input.message_after !== undefined) rpcError("before and after are mutually exclusive");
+      const messageAfter = textValue(input.message_after, `${operation}.message_after`, { optional: true });
       const messageBefore = textValue(input.message_before, `${operation}.message_before`, { optional: true });
       return { operation, input: {
         session_id: textValue(input.session_id, `${operation}.session_id`)!,
         message_limit: integerValue(input.message_limit, `${operation}.message_limit`, 10, 1, 200),
         ...(messageBefore === undefined ? {} : { message_before: messageBefore }),
+        ...(messageAfter === undefined ? {} : { message_after: messageAfter }),
       } };
     }
     case "sessions.pin":
@@ -677,7 +684,7 @@ export function parseDashboardRpcCall(value: unknown): DashboardRpcCall {
       exactKeys(input, ["session_id"], `${operation}.input`);
       return { operation, input: { session_id: textValue(input.session_id, `${operation}.session_id`)! } };
     case "sessions.send": {
-      exactKeys(input, ["session_id", "text", "attachment_ids"], `${operation}.input`);
+      exactKeys(input, ["session_id", "text", "attachment_ids", "client_message_id"], `${operation}.input`);
       const text = textValue(input.text, `${operation}.text`, { allowEmpty: true })!;
       const attachmentIds = attachmentIdsValue(input.attachment_ids, `${operation}.attachment_ids`);
       if (!text && !attachmentIds?.length) rpcError(`${operation} requires text or an attachment`);
@@ -687,6 +694,7 @@ export function parseDashboardRpcCall(value: unknown): DashboardRpcCall {
           : { session_id: textValue(input.session_id, `${operation}.session_id`)! }),
         text,
         ...(attachmentIds ? { attachment_ids: attachmentIds } : {}),
+        ...(input.client_message_id === undefined ? {} : { client_message_id: textValue(input.client_message_id, `${operation}.client_message_id`)! }),
       } };
     }
     case "sessions.stop":

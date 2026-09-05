@@ -419,6 +419,7 @@ export class DesktopGateway {
         const result = await this.composition.parts.conversations.send({
           ...(call.input.session_id ? { session_id: call.input.session_id } : {}),
           text: call.input.text,
+          ...(call.input.client_message_id ? { client_message_id: call.input.client_message_id } : {}),
           attachments,
         });
         this.options.attachments.consume(attachmentIds);

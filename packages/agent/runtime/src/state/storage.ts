@@ -215,6 +215,12 @@ const displayWindow = (
   options: DashboardSessionPageOptions,
 ): { limit: number; start: number; end: number } => {
   const limit = Math.max(1, Math.min(Math.trunc(options.limit), 200));
+  if (options.before !== undefined && options.after !== undefined) throw new InvalidTranscriptCursorError("before and after are mutually exclusive");
+  if (options.after !== undefined) {
+    const start = displayGroupNumber(sessionId, options.after) + 1;
+    if (start > total) throw new InvalidTranscriptCursorError("message cursor is outside the current transcript");
+    return { limit, start, end: Math.min(total, start + limit) };
+  }
   const end = options.before === undefined ? total : displayGroupNumber(sessionId, options.before);
   if (end < 0 || end > total || (options.before !== undefined && end === total)) {
     throw new InvalidTranscriptCursorError("message cursor is outside the current transcript");
@@ -237,6 +243,9 @@ const displayPageMetadata = (
   newest_cursor: start < end ? displayGroupCursor(sessionId, end - 1) : null,
   previous_cursor: start > 0 ? displayGroupCursor(sessionId, start) : null,
   has_previous: start > 0,
+  has_next: end < total,
+  next_cursor: end < total && end > start ? displayGroupCursor(sessionId, end - 1) : null,
+  group_cursors: Array.from({ length: end - start }, (_, i) => displayGroupCursor(sessionId, start + i)),
 });
 
 const transcriptDisplayPage = (
@@ -290,6 +299,7 @@ const transcriptDisplayPage = (
   for (let selectedIndex = 0; selectedIndex < selected.length; selectedIndex += 1) {
     const [eventStart, eventEnd] = selected[selectedIndex]!;
     const displayGroupId = displayGroupCursor(sessionId, start + selectedIndex);
+    let messageOrdinal = 0;
     let latestMessage: JsonObject | undefined;
     for (const event of events.slice(eventStart, eventEnd)) {
       if (text(event.kind) === "message") {
@@ -297,6 +307,8 @@ const transcriptDisplayPage = (
         if (text(message.role)) {
           latestMessage = {
             ...publicMessage(message),
+            display_id: `${displayGroupId}:${messageOrdinal++}`,
+            source_reason: text(event.reason),
             display_group_id: displayGroupId,
             created_at: transcriptEventTimestamp(event),
           };
@@ -328,6 +340,7 @@ const transcriptDisplayPage = (
       if (marker) {
         latestMessage = {
           ...marker,
+              display_id: `${displayGroupId}:${messageOrdinal++}`,
           display_group_id: displayGroupId,
           created_at: transcriptEventTimestamp(event),
         };
@@ -357,6 +370,7 @@ export interface DashboardSessionListOptions {
 export interface DashboardSessionPageOptions {
   limit: number;
   before?: string;
+  after?: string;
 }
 
 interface ReplayCacheEntry {
@@ -1710,13 +1724,16 @@ export class SqliteRuntimeStore implements RuntimeStore {
           status: turnStatus,
           elapsed_ms: Number.isFinite(elapsed) ? elapsed : null,
         } : undefined;
-        let latestMessage: JsonObject | undefined;
+        let messageOrdinal = 0;
+    let latestMessage: JsonObject | undefined;
         for (const { event } of scanTranscriptBuffer(groupBytes, groupStart, true).lines) {
           if (text(event.kind) === "message") {
             const message = parseObject(event.message);
             if (text(message.role)) {
               latestMessage = {
                 ...publicMessage(message),
+            display_id: `${displayGroupId}:${messageOrdinal++}`,
+            source_reason: text(event.reason),
                 display_group_id: displayGroupId,
                 created_at: transcriptEventTimestamp(event),
                 ...(turn ? { turn } : {}),
@@ -1738,6 +1755,7 @@ export class SqliteRuntimeStore implements RuntimeStore {
           if (turnError) {
             latestMessage = {
               role: "assistant",
+              display_id: `${displayGroupId}:${messageOrdinal++}`,
               content: [{ type: "text", text: turnError.message }],
               display_group_id: displayGroupId,
               created_at: turnError.ts,
@@ -1750,6 +1768,7 @@ export class SqliteRuntimeStore implements RuntimeStore {
           if (marker) {
             latestMessage = {
               ...marker,
+              display_id: `${displayGroupId}:${messageOrdinal++}`,
               display_group_id: displayGroupId,
               created_at: transcriptEventTimestamp(event),
             };

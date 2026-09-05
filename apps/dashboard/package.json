@@ -12,6 +12,7 @@
     "@lxe/desktop-protocol": "workspace:*",
     "@lxe/protocol": "workspace:*",
     "@tanstack/react-query": "^5.90.21",
+    "@tanstack/react-virtual": "3.14.10",
     "highlight.js": "^11.11.1",
     "katex": "^0.16.47",
     "lucide-react": "^0.562.0",

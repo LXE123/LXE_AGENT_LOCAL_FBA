@@ -50,6 +50,8 @@ export interface RuntimeEnvironmentSnapshot {
 
 export interface RuntimeConversationMessage {
   contextTokenAnchor?: import("./context-meter").ContextTokenAnchor;
+  message_id?: string;
+  client_message_id?: string;
   environmentContext?: RuntimeEnvironmentSnapshot;
   role: "user" | "assistant" | "tool" | "system";
   content: RuntimeMessageContent;

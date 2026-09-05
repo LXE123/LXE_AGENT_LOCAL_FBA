@@ -411,7 +411,7 @@ function App({
   }
 
   async function sendConversation(text: string, attachments: DesktopInputAttachmentPayload[]): Promise<void> {
-    const pendingId = `pending-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const pendingId = crypto.randomUUID();
     const pendingMessage: PendingConversationMessage = {
       pendingId,
       sessionId: selectedSessionId,
@@ -425,10 +425,11 @@ function App({
       input: {
         ...(selectedSessionId ? { session_id: selectedSessionId } : {}),
         text,
+        client_message_id: pendingId,
         ...(attachments.length ? { attachment_ids: attachments.map((item) => item.attachment_id) } : {}),
       },
     }).catch((cause) => {
-      setPendingConversationMessages((current) => current.filter((item) => item.pendingId !== pendingId));
+      setPendingConversationMessages((current) => current.map((item) => item.pendingId === pendingId ? { ...item, error: cause instanceof Error ? cause.message : String(cause) } : item));
       throw cause;
     });
     queryClient.setQueryData<DesktopConversationActivityPayload>(
@@ -437,6 +438,8 @@ function App({
         const optimisticTurn: DesktopConversationTurnPayload = {
           turn_id: result.turn_id,
           message_id: result.message_id,
+          client_message_id: pendingId,
+          created_at: pendingMessage.createdAt,
           text,
           ...(attachments.length ? { attachments } : {}),
           state: result.state,
@@ -450,6 +453,7 @@ function App({
           queued: [],
           latest: null,
         };
+        if ([activity.active, activity.latest, ...activity.queued].some((turn) => turn?.turn_id === result.turn_id)) return activity;
         if (result.state === "running") {
           return {
             ...activity,
@@ -465,7 +469,7 @@ function App({
         };
       },
     );
-    setPendingConversationMessages((current) => current.filter((item) => item.pendingId !== pendingId));
+    setPendingConversationMessages((current) => current.map((item) => item.pendingId === pendingId ? { ...item, sessionId: result.session_id, turnId: result.turn_id, messageId: result.message_id } : item));
     setSelectedSessionId(result.session_id);
     setNewConversation(false);
     await Promise.all([
@@ -732,6 +736,11 @@ function App({
   }
 
   const sessionDetail = sessionDetailQuery.data ?? null;
+  useEffect(() => {
+    const persisted = new Set(sessionDetail?.messages.flatMap((message) => message.client_message_id ? [message.client_message_id] : []) ?? []);
+    if (persisted.size) setPendingConversationMessages((current) => current.filter((message) => !persisted.has(message.pendingId)));
+  }, [sessionDetail?.messages]);
+
   const selectedSession = sessions.items.find((session) => session.session_id === selectedSessionId)
     || sessionDetail?.session
     || null;
@@ -966,7 +975,6 @@ function App({
                     runtimeUnavailableMessage={setupComplete
                       ? t.conversation.unavailable
                       : t.conversation.modelUnavailable}
-                    transcriptFetchedAt={sessionDetail?.messages_page.fetched_at ?? 0}
                     loading={dashboardRuntimeReady
                       && !newConversation
                       && sessionDetailQuery.isPending
@@ -982,7 +990,11 @@ function App({
                     loadOlderError={sessionDetail && sessionDetailQuery.isFetchPreviousPageError
                       ? queryError(sessionDetailQuery.error)
                       : ""}
-                    onLoadOlder={() => sessionDetailQuery.fetchPreviousPage()}
+                    onLoadOlder={sessionDetailQuery.fetchPreviousPage}
+                    hasNewer={sessionDetailQuery.hasNextPage}
+                    onLoadNewer={sessionDetailQuery.fetchNextPage}
+                    onVisibleGroups={sessionDetailQuery.setVisibleGroups}
+                    onJumpToLatest={sessionDetailQuery.jumpToLatest}
                     onModelChange={setCurrentModel}
                     onThinkingLevelChange={setCurrentThinkingLevel}
                     onSend={sendConversation}

@@ -444,7 +444,7 @@ export class TypeScriptAgentRuntime implements AgentRuntime {
       const userContent: RuntimeMessageContent = heartbeat
         ? heartbeatPrompt(pendingEvents)
         : userContentWithSystemEvents(job.user_input, job.user_content_blocks, pendingEvents);
-      const userMessage: RuntimeMessage = { role: "user", content: withTurnContext(userContent, job.diagnostics) };
+      const userMessage: RuntimeMessage = { role: "user", content: withTurnContext(userContent, job.diagnostics), message_id: job.message_id, ...(typeof job.raw_data.client_message_id === "string" ? { client_message_id: job.raw_data.client_message_id } : {}) };
       messages.push(userMessage);
       const firstTools = heartbeat || (this.options.maxSteps ?? DEFAULT_MAX_STEPS) <= 1 ? [] : toolExposure.schemas();
       const initialMeasurement = contextPipeline.measure(systemPrompt, messages, firstTools,

@@ -1848,7 +1848,7 @@ describe("TypeScriptAgentRuntime", () => {
       reply: "执行失败: provider offline",
     }));
     expect(store.turnErrors).toEqual([{ turn_id: "j1", message: "执行失败: provider offline" }]);
-    expect(store.messages).toEqual([{ role: "user", content: "hello" }, expect.objectContaining({ environmentContext: expect.any(Object) })]);
+    expect(store.messages).toEqual([{ role: "user", content: "hello", message_id: "m1" }, expect.objectContaining({ environmentContext: expect.any(Object) })]);
     expect(store.metrics.at(-1)).toEqual(expect.objectContaining({ status: "error" }));
     await runtime.stop();
   });
