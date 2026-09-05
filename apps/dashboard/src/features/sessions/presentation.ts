@@ -1,3 +1,4 @@
+import type { DesktopConversationActivityPayload, DesktopConversationSendPayload } from "@lxe/desktop-protocol";
 import type { DesktopConversationTurnPayload, SessionMessage, SessionArtifactPayload } from "../../api/payloads";
 import { isRecord } from "../../shared/content";
 import { fallbackToolCallBlocks, toolOperations, type ToolOperation } from "./conversation";
@@ -11,6 +12,7 @@ export interface ConversationRow {
   id: string; groupId: string; turnId: string; kind: "message" | "tool" | "status" | "artifacts";
   message?: SessionMessage; operation?: ToolOperation;
   liveTool?: NonNullable<DesktopConversationTurnPayload["stream"]>["tool_steps"][number];
+  phase?: string; startedAt?: number; elapsedMs?: number;
   status?: string; error?: string; createdAt: number; artifacts?: SessionArtifactPayload[];
 }
 export const userDisplayId = (message: { client_message_id?: string; message_id?: string; display_id?: string }): string =>
@@ -63,7 +65,7 @@ export function conversationRows(messages: SessionMessage[], turns: DesktopConve
   }
   const turnStatus = new Map(messages.flatMap((message) => message.turn?.status && !isInternalMessage(message) ? [[message.turn.turn_id, message] as const] : []));
   for (const [id, message] of turnStatus) {
-    if (!turns.some((turn) => turn.turn_id === id)) rows.push({id:`status:${id}`,turnId:id,groupId:message.display_group_id,createdAt:(message.created_at??0)*1000,kind:"status",status:message.turn!.status!});
+    if (!turns.some((turn) => turn.turn_id === id)) rows.push({id:`status:${id}`,turnId:id,groupId:message.display_group_id,createdAt:(message.created_at??0)*1000,kind:"status",status:message.turn!.status!,elapsedMs:message.turn!.elapsed_ms ?? undefined});
   }
   for (const turn of turns) {
     const history = byTurn.get(turn.turn_id) ?? [];
@@ -84,7 +86,7 @@ export function conversationRows(messages: SessionMessage[], turns: DesktopConve
     const insertion = rows.findIndex((row) => row.turnId === turn.turn_id && row.message?.role !== "user");
     for (let i = rows.length - 1; i >= 0; i--) if (partIds.has(rows[i]!.id)) rows.splice(i, 1);
     if (insertion >= 0) rows.splice(Math.min(insertion, rows.length), 0, ...merged); else rows.push(...merged);
-    rows.push({ ...base, id: `status:${turn.turn_id}`, kind: "status", status: turn.state });
+    rows.push({ ...base, id: `status:${turn.turn_id}`, kind: "status", status: turn.state, phase: turn.stream?.display_metrics.phase, startedAt: turn.started_at, elapsedMs: turn.started_at > 0 && turn.settled_at > 0 ? turn.settled_at - turn.started_at : undefined });
   }
   for (const item of pending) {
     const id = `user:${item.pendingId}`;
@@ -106,4 +108,41 @@ export function conversationRows(messages: SessionMessage[], turns: DesktopConve
     }
     return 0;
   });
+}
+
+export function acknowledgeConversationSend(current: DesktopConversationActivityPayload | undefined, result: DesktopConversationSendPayload, pendingMessage: PendingMessage): DesktopConversationActivityPayload {
+
+  const optimisticTurn: DesktopConversationTurnPayload = {
+    turn_id: result.turn_id,
+    message_id: result.message_id,
+    client_message_id: pendingMessage.pendingId,
+    created_at: pendingMessage.createdAt,
+    text: pendingMessage.text,
+    ...(pendingMessage.attachments.length ? { attachments: pendingMessage.attachments } : {}),
+    state: result.state,
+    started_at: 0,
+    user_persisted_at: 0,
+    settled_at: 0,
+  };
+  const activity = current ?? {
+    session_id: result.session_id,
+    active: null,
+    queued: [],
+    latest: null,
+  };
+  if ([activity.active, activity.latest, ...activity.queued].some((turn) => turn?.turn_id === result.turn_id)) return activity;
+  if (result.state === "running") {
+    return {
+      ...activity,
+      active: optimisticTurn,
+      queued: activity.queued.filter((turn) => turn.turn_id !== result.turn_id),
+    };
+  }
+  return {
+    ...activity,
+    queued: activity.queued.some((turn) => turn.turn_id === result.turn_id)
+      ? activity.queued
+      : [...activity.queued, optimisticTurn],
+  };
+
 }

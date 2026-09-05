@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 
 import "./styles.css";
+import { acknowledgeConversationSend } from "./features/sessions/presentation";
 import { callDashboard } from "./api/client";
 import { dashboardQueryKeys } from "./api/query-keys";
 import { DashboardQueryProvider } from "./api/query-client";
@@ -434,40 +435,7 @@ function App({
     });
     queryClient.setQueryData<DesktopConversationActivityPayload>(
       dashboardQueryKeys.sessions.activity(result.session_id),
-      (current) => {
-        const optimisticTurn: DesktopConversationTurnPayload = {
-          turn_id: result.turn_id,
-          message_id: result.message_id,
-          client_message_id: pendingId,
-          created_at: pendingMessage.createdAt,
-          text,
-          ...(attachments.length ? { attachments } : {}),
-          state: result.state,
-          started_at: 0,
-          user_persisted_at: 0,
-          settled_at: 0,
-        };
-        const activity = current ?? {
-          session_id: result.session_id,
-          active: null,
-          queued: [],
-          latest: null,
-        };
-        if ([activity.active, activity.latest, ...activity.queued].some((turn) => turn?.turn_id === result.turn_id)) return activity;
-        if (result.state === "running") {
-          return {
-            ...activity,
-            active: optimisticTurn,
-            queued: activity.queued.filter((turn) => turn.turn_id !== result.turn_id),
-          };
-        }
-        return {
-          ...activity,
-          queued: activity.queued.some((turn) => turn.turn_id === result.turn_id)
-            ? activity.queued
-            : [...activity.queued, optimisticTurn],
-        };
-      },
+      (current) => acknowledgeConversationSend(current, result, pendingMessage),
     );
     setPendingConversationMessages((current) => current.map((item) => item.pendingId === pendingId ? { ...item, sessionId: result.session_id, turnId: result.turn_id, messageId: result.message_id } : item));
     setSelectedSessionId(result.session_id);

@@ -8,19 +8,21 @@ const view = readFileSync(path.join(sourceDir, "features/sessions/view.tsx"), "u
 const main = readFileSync(path.join(sourceDir, "main.tsx"), "utf8");
 const queries = readFileSync(path.join(sourceDir, "api/queries.ts"), "utf8");
 const conversation = readFileSync(path.join(sourceDir, "features/sessions/conversation.ts"), "utf8");
+const windowView = readFileSync(path.join(sourceDir, "features/sessions/virtual-window.tsx"), "utf8");
+const presentation = readFileSync(path.join(sourceDir, "features/sessions/presentation.ts"), "utf8");
 const markdown = readFileSync(path.join(sourceDir, "shared/ui/markdown.tsx"), "utf8");
 const styles = readFileSync(path.join(sourceDir, "styles.css"), "utf8").replaceAll("\r\n", "\n");
 
 test("sessions view exposes text conversation controls and IME-safe keyboard behavior", () => {
   assert.match(view, /maxLength=\{8192\}/);
   assert.match(view, /event\.key !== "Enter" \|\| event\.shiftKey \|\| event\.nativeEvent\.isComposing/);
-  assert.match(view, /aria-live="polite"/);
+  assert.match(windowView, /aria-live="polite"/);
   // Send and stop are one control in two modes, so the running turn can always
   // be interrupted from the same place the message was sent.
   assert.match(view, /data-mode=\{hasWork \? "stop" : "send"\}/);
   assert.match(view, /onClick=\{\(\) => void \(hasWork \? stop\(\) : submit\(\)\)\}/);
   assert.doesNotMatch(view, /conversation-stop-button/);
-  assert.match(view, /conversation-load-earlier/);
+  assert.match(windowView, /loadOlder/);
   assert.match(view, /session-new-button/);
   assert.match(view, /selectConversationFiles/);
   assert.match(view, /stageDroppedConversationFiles/);
@@ -56,30 +58,22 @@ test("the composer edits thinking effort using the shared next-turn preference",
   assert.match(styles, /\.conversation-thinking-menu \{[^}]*bottom:\s*calc\(100% \+ 9px\)/s);
 });
 
-test("optimistic cards retire on transcript watermarks, never on message text", () => {
-  assert.match(view, /transcriptCaughtUp\(turn\.user_persisted_at, transcriptFetchedAt\)/);
-  assert.match(view, /transcriptCaughtUp\(turn\.settled_at, transcriptFetchedAt\)/);
-  // The runtime prefixes system events onto the stored user message, so any
-  // text comparison against the transcript silently stops matching.
-  assert.doesNotMatch(view, /transcriptContains/);
-  assert.match(main, /transcriptFetchedAt=\{sessionDetail\?\.messages_page\.fetched_at/);
-  assert.match(styles, /\.local-turn > \.message-with-meta\.role-user\s*\{[^}]*justify-self:\s*end;/s);
+test("message identity confirms persistence without retiring the visible component", () => {
+  assert.doesNotMatch(view, /transcriptCaughtUp|transcriptFetchedAt|LocalTurnCards/);
+  assert.match(presentation, /client_message_id/);
+  assert.match(view, /UnifiedConversationRow/);
+  assert.match(windowView, /getItemKey/);
 });
 
-test("the transcript stays scrollable back through history", () => {
-  assert.doesNotMatch(styles, /\.conversation-transcript \{[^}]*align-content: end/);
-  assert.doesNotMatch(styles, /\.conversation-transcript > :first-child \{\s*margin-top: auto;/);
-  assert.match(styles, /\.conversation-transcript \{[^}]*scrollbar-gutter:\s*stable[^}]*scrollbar-color:\s*rgba\(122, 112, 101, 0\.22\) transparent[^}]*scrollbar-width:\s*thin/s);
-  assert.doesNotMatch(styles, /\.message-markdown tbody tr:hover/);
-  assert.match(styles, /\.conversation-transcript::-webkit-scrollbar-track,[\s\S]*?background:\s*transparent/s);
-  assert.match(styles, /\.conversation-transcript::-webkit-scrollbar-thumb \{[^}]*border:\s*3px solid transparent[^}]*border-radius:\s*999px/s);
-  assert.match(view, /new IntersectionObserver/);
-  assert.match(view, /rootMargin: "120px 0px 0px 0px"/);
-  assert.match(view, /previousHeight[\s\S]*?transcript\.scrollHeight - previousHeight/);
-  // Following every stream delta would drag the reader back down mid-scroll.
-  assert.match(view, /if \(loadingOlderRef\.current \|\| !pinnedToBottom\) return;/);
-  assert.match(view, /requestAnimationFrame\(scrollToLatest\)/);
-  assert.match(view, /conversation-jump-latest/);
+test("the transcript uses a bounded virtual window with bidirectional history", () => {
+  assert.match(windowView, /useVirtualizer/);
+  assert.match(windowView, /anchorTo: "end"/);
+  assert.match(windowView, /overflowAnchor: "none"/);
+  assert.match(windowView, /overscan: 5/);
+  assert.match(windowView, /conversation-jump-latest/);
+  assert.match(queries, /message_after: cursor/);
+  assert.match(queries, /boundConversationWindow/);
+  assert.doesNotMatch(view, /previousHeight/);
 });
 
 test("the focused conversation takes the full panel without a second session column", () => {
@@ -108,7 +102,7 @@ test("conversation messages and composer share the same focused reading axis", (
   assert.match(styles, /\.sessions-focus \.content-panel-fill \{[^}]*background:\s*var\(--bg\)/s);
   assert.match(styles, /\.conversation-feed \.message-card\.role-user \.message-markdown > :last-child \{[^}]*margin-bottom:\s*0/s);
   assert.match(view, /const showCharacterCount = text\.length >= Math\.floor\(8192 \* 0\.75\)/);
-  assert.match(view, /showRoleBadge = role !== "assistant" && role !== "user"/);
+  assert.match(view, /message.role !== "user" && message.role !== "assistant"/);
 });
 
 test("conversation markdown tables use separated cells instead of a framed grid", () => {
@@ -138,19 +132,13 @@ test("conversation fenced code reaches the syntax highlighter", () => {
   assert.match(styles, /\.hljs-string,[^}]*color:\s*var\(--rate-good\)/s);
 });
 
-test("live turns expose one truthful phase and locally ticking elapsed time", () => {
-  assert.match(view, /case "preparing_context": return t\.conversation\.preparingContext/);
-  assert.match(view, /case "waiting_model": return t\.conversation\.waitingModel/);
-  assert.match(view, /case "thinking": return t\.conversation\.thinking/);
-  assert.match(view, /case "running_tool": return t\.conversation\.runningTool/);
-  assert.match(view, /case "generating_answer": return t\.conversation\.generatingAnswer/);
-  assert.match(view, /if \(!stream\) return t\.conversation\.preparingContext/);
-  assert.match(view, /turn\.started_at > 0/);
+test("unified status rows retain phases and locally ticking elapsed time", () => {
+  for (const phase of ["preparing_context", "waiting_model", "thinking", "running_tool", "generating_answer"]) assert.ok(view.includes(`case "${phase}"`));
+  assert.match(view, /function ConversationStatus/);
   assert.match(view, /window\.setInterval\(\(\) => setClock\(Date\.now\(\)\), 250\)/);
   assert.match(view, /elapsedMs >= 1_000/);
-  assert.match(styles, /\.live-progress-status \{[^}]*width:\s*min\(100%, var\(--assistant-content-width\)\)/s);
-  assert.doesNotMatch(view, /conversation-live-status|live-response-status|live-response-meta|toolPending/);
-  assert.doesNotMatch(styles, /\.conversation-live-status|\.live-response-status|\.live-response-meta/);
+  assert.match(presentation, /turn\.started_at/);
+  assert.match(styles, /\.live-progress-status/);
 });
 
 test("details and runtime status overlay the conversation without moving the reading axis", () => {
@@ -163,7 +151,7 @@ test("details and runtime status overlay the conversation without moving the rea
 
 test("tool files reach the conversation and open through Main", () => {
   assert.match(view, /turn-file-card/);
-  assert.match(view, /item\.type === "artifact_group"/);
+  assert.match(view, /row.kind === "artifacts"/);
   assert.match(conversation, /function appendArtifactGroups/);
   assert.match(conversation, /artifact\.turn_id/);
   assert.doesNotMatch(view, /toolGroupArtifacts\(group\.messages\)/);
@@ -230,53 +218,30 @@ test("dashboard sends through Main, restores activity, and merges cursor history
   assert.doesNotMatch(main, /response_route_id/);
 });
 
-test("a sent user message renders locally before the send RPC settles", () => {
-  const enqueuePending = main.indexOf("setPendingConversationMessages((current) => [...current, pendingMessage])");
-  const sendRpc = main.indexOf('operation: "sessions.send"', enqueuePending);
-  assert.ok(enqueuePending >= 0 && sendRpc > enqueuePending);
-  assert.match(main, /pendingMessages=\{visiblePendingConversationMessages\}/);
-  assert.match(main, /current\.filter\(\(item\) => item\.pendingId !== pendingId\)/);
-  assert.match(view, /pendingMessages\.map\(\(message\) =>/);
-  assert.match(view, /className="local-turn pending-local-turn"/);
-  assert.match(view, /<MessageMeta createdAt=\{message\.createdAt \/ 1000\} role="user" text=\{message\.text\}/);
+test("a user message is projected before the RPC settles and remains on send failure", () => {
+  const enqueue = main.indexOf("setPendingConversationMessages((current) => [...current, pendingMessage])");
+  assert.ok(enqueue >= 0 && main.indexOf('operation: "sessions.send"', enqueue) > enqueue);
+  assert.match(main, /client_message_id: pendingId/);
+  assert.match(main, /acknowledgeConversationSend/);
+  assert.match(presentation, /item.error/);
+  assert.doesNotMatch(view, /pendingMessages\.map/);
 });
 
-test("thinking, tools, and answers render in one strict response timeline", () => {
-  assert.match(view, /<span className="tool-turn-title">\{summary\.text/);
-  assert.match(view, /summarizeToolOperations\(operations, toolBatchLabels\(t\)\)/);
-  assert.match(conversation, /type: "response_group"/);
-  assert.match(conversation, /const timeline: ConversationTimelineItem\[\] = \[\]/);
-  assert.match(conversation, /timeline\.push\(toolTimelineItem/);
-  assert.match(conversation, /metadataMessage/);
-  assert.match(view, /className="response-status"/);
-  assert.match(view, /className="response-timeline"/);
-  assert.match(view, /response-final-answer/);
-  assert.match(view, /className="process-thinking-text"/);
-  assert.doesNotMatch(view, /stream\.thinking \? <ThinkingBlock/);
-  assert.match(view, /liveOwnedTurnIds/);
-  assert.match(view, /item\.type === "response_group" && item\.group\.turn\?\.turn_id/);
-  assert.doesNotMatch(view, /similarity|startsWith\(stream\.content\)/);
-  assert.doesNotMatch(view, /assistant-tool-stack/);
-  assert.match(view, /className="tool-op-list"/);
-  assert.match(view, /className="tool-op-argument"/);
-  assert.match(view, /function ProcessToolGroup[\s\S]*?useState\(false\)/);
-  assert.doesNotMatch(view, /openOperations\.get\(operation\.key\) \?\? operation\.status === "error"/);
-  assert.match(view, /expandable: hasLiveToolOperationDetails\(step\)/);
-  assert.match(view, /<LiveTimeline items=\{timeline\} parts=\{processParts\}/);
-  assert.match(conversation, /export function buildLiveTimeline/);
-  assert.match(conversation, /part\.presentation === "final"/);
-  assert.doesNotMatch(view, /visibleProcessParts|answerPartIds/);
-  assert.doesNotMatch(view, /response-process-summary/);
-  assert.doesNotMatch(view, /stream\?\.tool_steps\.length/);
-  assert.match(view, /disabled=\{!expandable\}/);
-  assert.doesNotMatch(view, /live-tool-operation-detail/);
+test("thinking, tools and text share one ordered row projection", () => {
+  assert.match(view, /conversationRows\(messages, turns/);
+  assert.match(view, /renderRow=\{/);
+  assert.match(windowView, /renderRow\(rows\[item.index\]/);
+  assert.match(presentation, /part.part_id/);
+  assert.match(presentation, /tool_step.id/);
+  assert.doesNotMatch(view, /PersistedTimeline|LiveTimeline|liveOwnedTurnIds/);
+  assert.match(view, /expandedRows.get\(row.id\)/);
 });
 
 test("reader messages expose only copy and timestamp metadata", () => {
   assert.match(view, /function MessageMeta/);
   assert.match(view, /className="message-meta-copy"/);
   assert.match(view, /formatMessageTime\(createdAt\)/);
-  assert.match(view, /readerFacingMessageText\(group\.metadataMessage\)/);
+  assert.match(view, /readerFacingMessageText\(message\)/);
   assert.match(view, /role === "user" \? time : copyButton/);
   assert.match(styles, /\.message-meta-copy\s*\{[^}]*background:\s*transparent;/s);
   assert.match(styles, /\.message-with-meta\.role-user\s*\{[^}]*align-items:\s*flex-end;/s);
@@ -298,13 +263,11 @@ test("assistant message metadata is smaller, sits closer to the response, and is
   assert.match(styles, /\.message-meta\.role-assistant \.message-meta-copy svg\s*\{[^}]*width:\s*13px;[^}]*height:\s*13px;/s);
 });
 
-test("the in-flight answer changes presentation without leaving the live timeline", () => {
-  assert.match(view, /buildLiveTimeline\(processParts, stream\?\.display_metrics\.phase\)/);
-  assert.match(view, /<LiveTimeline items=\{timeline\} parts=\{processParts\}/);
-  assert.match(view, /<LiveTextPart key=\{item\.key\} part=\{part\} presentation=\{item\.presentation\}/);
-  assert.doesNotMatch(view, /processParts\.filter\(|visibleProcessParts|liveAnswerProjection/);
-  assert.match(conversation, /phase === "generating_answer"/);
-  assert.match(conversation, /part\.sequence > latestToolSequence/);
+test("the same component handles streamed and persisted content without replaying text", () => {
+  assert.match(view, /UnifiedConversationRow = React.memo/);
+  assert.doesNotMatch(view, /usePacedText|LiveTextPart|TEXT_RENDER_PACE/);
+  assert.match(presentation, /existing.get\(part.id\)/);
+  assert.match(windowView, /key=\{item.key\}/);
 });
 
 test("a tool reads the same live as it does in history", () => {

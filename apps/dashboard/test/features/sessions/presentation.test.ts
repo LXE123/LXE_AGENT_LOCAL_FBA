@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { conversationRows, type PendingMessage } from "../../../src/features/sessions/presentation";
+import { acknowledgeConversationSend, conversationRows, type PendingMessage } from "../../../src/features/sessions/presentation";
 import { boundConversationWindow, appendConversationWindow, prependConversationWindow } from "../../../src/features/sessions/model";
 import type { SessionDetailPayload, SessionMessage, DesktopConversationTurnPayload } from "../../../src/api/payloads";
 
@@ -27,7 +27,7 @@ describe("unified conversation identity", () => {
     expect(conversationRows([{...stored,content:"<environment_context>example</environment_context>"}],[],[]).filter(row=>row.kind === "message")).toHaveLength(1);
   });
   test("streaming and persisted block identity and failed attempt order survive handoff", () => {
-    const streaming = {...turn,stream:{process_parts:[
+    const streaming = {...turn,stream:{display_metrics:{phase:"generating_answer"},process_parts:[
       {type:"text",part_id:"failed:0",sequence:1,text:"partial failure",status:"error",presentation:"process"},
       {type:"thinking",part_id:"answer:0",sequence:2,text:"thinking",status:"completed",redacted_count:0},
       {type:"text",part_id:"answer:1",sequence:3,text:"final",status:"completed",presentation:"final"},
@@ -61,4 +61,14 @@ describe("bounded reading window", () => {
     expect(bounded.messages.map(m=>m.display_group_id)).toEqual(["g1"]);
     expect(bounded.messages_page.has_previous).toBe(true);expect(bounded.messages_page.has_next).toBe(true);
   });
+});
+
+
+test("late send acknowledgements cannot overwrite a running or completed activity snapshot", () => {
+  const current={session_id:"s",active:null,latest:turn,queued:[]};
+  const result={session_id:"s",turn_id:"turn",message_id:"server",created:false,state:"running" as const};
+  expect(acknowledgeConversationSend(current,result,pending)).toBe(current);
+  const accepted=acknowledgeConversationSend(undefined,result,pending);
+  expect(accepted.active?.client_message_id).toBe("client");
+  expect(conversationRows([],accepted.active?[accepted.active]:[],[pending]).filter(row=>row.message?.role === "user")).toHaveLength(1);
 });

@@ -1374,6 +1374,36 @@ function ConversationComposer({
   );
 }
 
+function ConversationStatus({ row }: { row: ConversationRow }) {
+  const t = useUiText();
+  const active = row.status === "running" || row.status === "stopping";
+  const [clock, setClock] = useState(Date.now);
+  useEffect(() => {
+    if (!active) return;
+    const timer = window.setInterval(() => setClock(Date.now()), 250);
+    return () => window.clearInterval(timer);
+  }, [active]);
+  const elapsedMs = active && row.startedAt && row.startedAt > 0 ? clock - row.startedAt : row.elapsedMs ?? 0;
+  const phaseLabel = () => {
+    switch (row.phase) {
+      case "preparing_context": return t.conversation.preparingContext;
+      case "waiting_model": return t.conversation.waitingModel;
+      case "thinking": return t.conversation.thinking;
+      case "running_tool": return t.conversation.runningTool;
+      case "generating_answer": return t.conversation.generatingAnswer;
+      default: return t.conversation.preparingContext;
+    }
+  };
+  const label = row.status === "error" ? t.conversation.error : row.status === "cancelled" ? t.conversation.cancelled
+    : row.status === "completed" ? t.conversation.completed : row.status === "queued" ? t.conversation.queued
+    : row.status === "stopping" ? t.conversation.stopping : phaseLabel();
+  return <div aria-live={row.status === "error" ? "assertive" : "polite"} className={`live-progress-status state-${row.status}`}>
+    {active ? <LoaderCircle className="conversation-spinner" size={13} /> : null}
+    <span className="live-progress-label">{label}</span>
+    {elapsedMs >= 1_000 ? <span className="live-progress-elapsed">{formatDurationMs(elapsedMs)}</span> : null}
+  </div>;
+}
+
 export const UnifiedConversationRow = React.memo(function UnifiedConversationRow({ row, expanded, onToggle, onOpenFile, onRevealFile, onOpenAttachment }: {
   row: ConversationRow; expanded: boolean; onToggle: (id: string) => void;
   onOpenFile: (id: string) => Promise<void>; onRevealFile: (id: string) => Promise<void>; onOpenAttachment: (id: string) => Promise<void>;
@@ -1381,7 +1411,7 @@ export const UnifiedConversationRow = React.memo(function UnifiedConversationRow
   const t = useUiText();
   const stateLabel = row.status === "error" ? t.conversation.error : row.status === "cancelled" ? t.conversation.cancelled
     : row.status === "completed" ? t.conversation.completed : row.status === "queued" ? t.conversation.queued : t.conversation.running;
-  if (row.kind === "status") return <div className="conversation-turn-state-row"><span className={`conversation-turn-state state-${row.status}`}>{stateLabel}</span></div>;
+  if (row.kind === "status") return <ConversationStatus row={row} />;
   if (row.kind === "artifacts") return <TurnFileList files={row.artifacts ?? []} onOpenFile={onOpenFile} onRevealFile={onRevealFile} />;
   if (row.kind === "tool") {
     const operation = row.operation ?? (row.liveTool ? liveToolOperations([row.liveTool])[0] : undefined);
