@@ -37,8 +37,8 @@ import {
   heartbeatPrompt,
   normalizePendingSystemEvents,
   userContentWithSystemEvents,
+  withTurnContext,
 } from "./system-events";
-import { appendTurnDiagnostics } from "./system-prompt";
 import type { RuntimeWireTraceAttempt, RuntimeWireTraceControllerPort } from "../providers/wire-trace";
 import type {
   AgentRuntime,
@@ -411,10 +411,9 @@ export class TypeScriptAgentRuntime implements AgentRuntime {
         workspace,
         ...(workspaceLease ? { workspaceSnapshot: workspaceLease.snapshot } : {}),
       };
-      const baseSystemPrompt = typeof this.options.systemPrompt === "function"
+      const systemPrompt = typeof this.options.systemPrompt === "function"
         ? this.options.systemPrompt(systemPromptContext)
         : this.options.systemPrompt;
-      const systemPrompt = appendTurnDiagnostics(baseSystemPrompt, job.diagnostics);
       const turnContext: RuntimeTurnContextRecord = {
         turn_id: job.job_id,
         job_kind: heartbeat ? "heartbeat" : "turn",
@@ -432,7 +431,7 @@ export class TypeScriptAgentRuntime implements AgentRuntime {
       const userContent: RuntimeMessageContent = heartbeat
         ? heartbeatPrompt(pendingEvents)
         : userContentWithSystemEvents(job.user_input, job.user_content_blocks, pendingEvents);
-      const userMessage: RuntimeMessage = { role: "user", content: userContent };
+      const userMessage: RuntimeMessage = { role: "user", content: withTurnContext(userContent, job.diagnostics) };
       messages.push(userMessage);
       observer.start({
         jobKind: heartbeat ? "heartbeat" : "turn",

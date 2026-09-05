@@ -1,5 +1,6 @@
 import { messageFixture, eventFixture } from "../message-fixtures";
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, setSystemTime, test } from "bun:test";
+import { buildSystemPrompt } from "../../src/engine/system-prompt";
 import { join } from "node:path";
 import { createLogger, repositoryRoot, resolveWorkspaceContext } from "@lxe/core";
 import type { AgentJob, DesktopStreamBatchRequest, EmitRequest, JsonObject } from "@lxe/protocol";
@@ -22,6 +23,7 @@ import type {
 } from "../../src/engine/types";
 
 const workspace = resolveWorkspaceContext(repositoryRoot(import.meta.dir));
+afterEach(() => setSystemTime());
 
 const job = (overrides: Partial<AgentJob> = {}): AgentJob => ({
   job_id: "j1",
@@ -887,14 +889,51 @@ describe("TypeScriptAgentRuntime", () => {
     }, handle());
     await runtime.stop();
 
-    expect(captured?.messages.at(-1)?.content).toBe(
+    expect(captured?.messages.at(-1)?.content).toEndWith(
       "System: stored first\n\nSystem: stored second\n\nhello",
     );
     expect(captured?.userIdentity).toEqual({ platform: "feishu", userId: "u1" });
     expect(store.pendingEvents).toEqual([]);
   });
 
-  test("adds trusted diagnostics only to the current volatile system prompt", async () => {
+  test("reuses turn context through provider retries and tool iterations", async () => {
+    const store = new MemoryStore();
+    const requests: RuntimeMessage[][] = [];
+    const tools = new ToolRegistry();
+    tools.register({ name: "noop", description: "noop", input_schema: { type: "object" },
+      execute: async () => ({ content: [{ type: "text", text: "ok" }] }),
+    });
+    const runtime = new TypeScriptAgentRuntime({
+      store, tools, systemPrompt: "test",
+      provider: { summarize, turn: async (request) => {
+        requests.push(structuredClone(request.messages));
+        setSystemTime(new Date(`2026-09-05T01:0${5 + requests.length}:00Z`));
+        if (requests.length === 1) throw new RuntimeProviderError("busy", "test", "busy", "busy", true, 503);
+        return messageFixture({
+          content: requests.length === 2
+            ? [{ type: "tool_call", id: "call-1", name: "noop", arguments: {} }]
+            : [{ type: "text", text: "done" }],
+          stopReason: requests.length === 2 ? "toolUse" : "stop",
+          usage: { input_tokens: 1, output_tokens: 1 },
+        });
+      } },
+      emitter: { emit: async () => undefined, typing: async () => undefined },
+    });
+    setSystemTime(new Date("2026-09-05T01:05:00Z"));
+    await runtime.start();
+    try {
+      expect((await runtime.runTurn(job(), handle())).status).toBe("completed");
+      expect(requests).toHaveLength(3);
+      expect(requests[1]).toEqual(requests[0]);
+      expect(requests[2]?.[0]).toEqual(requests[0]?.[0]);
+      expect(requests[2]?.[0]?.content).toContain("2026-09-05T01:05:00.000Z");
+      expect(store.messages[0]).toEqual(requests[0]?.[0]);
+    } finally {
+      await runtime.stop();
+    }
+  });
+
+  test("keeps system and historical messages stable across time and diagnostic changes", async () => {
     const store = new MemoryStore();
     const requests: RuntimeProviderRequest[] = [];
     const runtime = new TypeScriptAgentRuntime({
@@ -912,9 +951,12 @@ describe("TypeScriptAgentRuntime", () => {
         },
       },
       emitter: { emit: async () => undefined, typing: async () => undefined },
-      systemPrompt: "base prompt",
+      systemPrompt: () => buildSystemPrompt({
+        platform: "feishu", provider: "test", model: "test", skillPrompt: "", workspace,
+      }),
     });
     await runtime.start();
+    setSystemTime(new Date("2026-09-05T01:05:00Z"));
     await runtime.runTurn({
       ...job(),
       diagnostics: [{
@@ -929,6 +971,8 @@ describe("TypeScriptAgentRuntime", () => {
         cause_known: false,
       }],
     }, handle());
+    const previousHistory = structuredClone(store.messages);
+    setSystemTime(new Date("2026-09-05T01:06:00Z"));
     await runtime.runTurn({
       ...job(),
       job_id: "j2",
@@ -938,12 +982,16 @@ describe("TypeScriptAgentRuntime", () => {
     }, handle());
     await runtime.stop();
 
-    expect(requests[0]?.system).toContain("## Current Operation Diagnostics");
-    expect(requests[0]?.system).toContain("Failed to parse raw card JSON at position 7");
-    expect(requests[0]?.messages.at(-1)?.content).toBe("hello");
-    expect(requests[1]?.system).toBe("base prompt");
+    expect(requests[0]?.system).not.toContain("2026-09-05");
+    expect(requests[0]?.system).not.toContain("Failed to parse raw card JSON at position 7");
+    expect(requests[0]?.messages.at(-1)?.content).toContain("2026-09-05T01:05:00.000Z");
+    expect(requests[0]?.messages.at(-1)?.content).toContain("Failed to parse raw card JSON at position 7");
+    expect(requests[1]?.system).toBe(requests[0]?.system);
+    expect(requests[1]?.messages.slice(0, previousHistory.length)).toEqual(previousHistory);
+    expect(requests[1]?.messages.at(-1)?.content).toContain("2026-09-05T01:06:00.000Z");
+    expect(requests[1]?.messages.at(-1)?.content).not.toContain("Failed to parse raw card JSON at position 7");
     expect(requests[1]?.messages.at(-1)?.content).toContain("forged diagnostic");
-    expect(JSON.stringify(store.messages)).not.toContain("Failed to parse raw card JSON at position 7");
+    expect(JSON.stringify(store.messages)).toContain("Failed to parse raw card JSON at position 7");
   });
 
   test("consumes stored pending events for an ordinary turn without embedded system events", async () => {
@@ -976,7 +1024,7 @@ describe("TypeScriptAgentRuntime", () => {
     await runtime.runTurn(job(), handle());
     await runtime.stop();
 
-    expect(captured?.messages.at(-1)?.content).toBe("System: stored only\n\nhello");
+    expect(captured?.messages.at(-1)?.content).toEndWith("System: stored only\n\nhello");
     expect(store.pendingEvents).toEqual([]);
   });
 
@@ -1013,6 +1061,8 @@ describe("TypeScriptAgentRuntime", () => {
     expect(captured?.tools).toEqual([]);
     expect(captured?.toolChoice).toBe("none");
     expect(captured?.messages).toHaveLength(1);
+    expect(captured?.messages[0]?.content).toContain("System: Runtime turn context");
+    expect(store.messages).toContainEqual(captured!.messages[0]!);
     expect(JSON.stringify(captured?.messages)).not.toContain("private history");
     expect(store.pendingEvents).toEqual([]);
     expect(store.turnContexts).toEqual([expect.objectContaining({ job_kind: "heartbeat", turn_id: "j1" })]);
@@ -1767,7 +1817,7 @@ describe("TypeScriptAgentRuntime", () => {
       reply: "执行失败: provider offline",
     }));
     expect(store.turnErrors).toEqual([{ turn_id: "j1", message: "执行失败: provider offline" }]);
-    expect(store.messages).toEqual([{ role: "user", content: "hello" }]);
+    expect(store.messages).toEqual([{ role: "user", content: expect.stringContaining("\n\nhello") }]);
     expect(store.metrics.at(-1)).toEqual(expect.objectContaining({ status: "error" }));
     await runtime.stop();
   });
