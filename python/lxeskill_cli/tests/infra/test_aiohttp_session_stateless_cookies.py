@@ -17,6 +17,9 @@ def test_shared_aiohttp_sessions_use_dummy_cookie_jar() -> None:
         try:
             erp_session = HttpSessionRegistry.get(HttpSessionPurpose.ERP)
             external_session = HttpSessionRegistry.get(HttpSessionPurpose.EXTERNAL)
+            data_session = HttpSessionRegistry.get(HttpSessionPurpose.DATA_SERVICE)
+            assert isinstance(data_session.cookie_jar, aiohttp.DummyCookieJar)
+            assert data_session.trust_env is False
 
             assert isinstance(erp_session.cookie_jar, aiohttp.DummyCookieJar)
             assert isinstance(external_session.cookie_jar, aiohttp.DummyCookieJar)

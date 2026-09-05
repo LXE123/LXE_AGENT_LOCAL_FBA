@@ -1,0 +1,92 @@
+{
+  "combo": {
+    "code": 200,
+    "message": "success",
+    "data": {
+      "page": "1",
+      "rowsPerPage": "20",
+      "total": 1,
+      "data": [
+        {
+          "comboSku": "HSP022",
+          "comboProductDetail": [
+            {
+              "stockSku": "DP2209092L02",
+              "quantity": 1
+            },
+            {
+              "stockSku": "DP2209092L07",
+              "quantity": 1
+            },
+            {
+              "stockSku": "DP2209091L46",
+              "quantity": 1
+            },
+            {
+              "stockSku": "DP2209091L02",
+              "quantity": 1
+            },
+            {
+              "stockSku": "DP181008L17",
+              "quantity": 1
+            },
+            {
+              "stockSku": "DP181008L14",
+              "quantity": 1
+            },
+            {
+              "stockSku": "DP2209081L04",
+              "quantity": 1
+            },
+            {
+              "stockSku": "DP2209081L03",
+              "quantity": 1
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "empty": {
+    "code": 200,
+    "message": "success",
+    "data": {
+      "page": "1",
+      "rowsPerPage": "20",
+      "total": 0,
+      "data": []
+    }
+  },
+  "listing_projection": [
+    {
+      "platformSku": "YYHDP2304273AL019810US133",
+      "asin": "B0CBR76ZFN",
+      "stockSku": "",
+      "stockType": 1,
+      "shopIds": ",2021143528,",
+      "amazonsite": "us"
+    },
+    {
+      "platformSku": "DP191026S09H3211-1",
+      "asin": "B09VZ2J57T",
+      "stockSku": "DP191026S09",
+      "stockType": 1,
+      "shopIds": ",2021143528",
+      "amazonsite": "us"
+    },
+    {
+      "platformSku": "DX021014S19&DX021092402Y130",
+      "asin": "B09QKWJMY2",
+      "stockSku": "DX021014S19&DX021092402Y130",
+      "stockType": 2,
+      "shopIds": "2021143528",
+      "amazonsite": "us"
+    }
+  ],
+  "shop": {
+    "sid": 2021143528,
+    "amazonsite": "us",
+    "name": "Amazon-YYH-US",
+    "profile_id": "2125407555479696"
+  }
+}

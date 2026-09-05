@@ -23,13 +23,6 @@ def _write_xlsx(path: Path, rows: list[dict], *, columns: list[str]) -> Path:
     return path
 
 
-def _combo_xlsx_bytes(rows: list[dict], *, max_components: int = 2) -> bytes:
-    columns = ["组合sku编码", "关联sku个数"]
-    for index in range(1, max_components + 1):
-        columns.extend([f"关联sku编号{index}", f"关联sku捆绑数量{index}"])
-    return _xlsx_bytes(rows, columns=columns)
-
-
 def _stock_xlsx_bytes(rows: list[dict]) -> bytes:
     return _xlsx_bytes(rows, columns=["库存SKU编号", "可用库存量"])
 
@@ -176,104 +169,12 @@ def _assert_standard_dimensions(path: Path, sheet_names: list[str]) -> None:
         workbook.close()
 
 
-def test_combo_step1_form_appends_hsp022_once_and_uses_export_fields() -> None:
-    form = inv._combo_step1_form_data(["SKU-A", "HSP022"], memcache_key="memcache-key")
-
-    assert _form_value({"data": form}, "orderIds") == "SKU-A\r\nHSP022\r\n"
-    assert _form_values({"data": form}, "fieldlabel") == ["uq101", "uq136", "uq138"]
-    assert _form_values({"data": form}, "map-name[]") == ["组合sku编码", "关联sku个数", "关联sku信息"]
-    assert _form_value({"data": form}, "memcacheKey") == "memcache-key"
-    assert _form_value({"data": form}, "operateType") == "19"
-    assert _form_value({"data": form}, "hiddenPage") == "1"
-
-
-def test_combo_prewarm_forms_append_hsp022_once() -> None:
-    list_form = inv._combo_list_prewarm_form_data(["SKU-A", "HSP022"])
-    template_form = inv._combo_export_template_prewarm_form_data(["SKU-A", "HSP022"])
-
-    assert _form_value({"data": list_form}, "searchLike") == "comboSku"
-    assert _form_value({"data": list_form}, "operate") == "Like"
-    assert _form_value({"data": list_form}, "isBatchSearch") == "1"
-    assert _form_value({"data": list_form}, "selecttype") == "comboSku"
-    assert _form_value({"data": list_form}, "stockData") == "SKU-A\r\nHSP022"
-    assert _form_value({"data": template_form}, "mod") == "export.exportTemplate"
-    assert _form_value({"data": template_form}, "data") == "SKU-A\r\nHSP022"
-    assert _form_value({"data": template_form}, "type") == "1"
-    assert _form_value({"data": template_form}, "menu") == "combosku"
-    assert _form_value({"data": template_form}, "exportUrl") == inv._combo_export_url()
-
-
-def test_combo_prewarm_failure_blocks_export(monkeypatch) -> None:
-    fake_session = _FakeSession([_FakeResponse(status=500, text_body="server error")])
-    monkeypatch.setattr(inv, "erp_http_session", fake_session)
-    monkeypatch.setattr(inv, "_resolve_private_amz_cookie", lambda: _async_value("private-amz-cookie"))
-
-    with pytest.raises(Exception, match="组合SKU预热 1请求失败"):
-        asyncio.run(
-            inv.prewarm_combo_sku_export(
-                ["SKU-A"],
-                delay_sec=0,
-            )
-        )
-
-    assert len(fake_session.calls) == 1
-    assert fake_session.calls[0]["url"] == inv._combo_list_url()
-
-
 def test_warehouse_search_form_uses_fixed_warehouse_and_crlf_skus() -> None:
     form = inv._warehouse_search_form_data(["SKU-A", "SKU-B"])
 
     assert _form_value({"data": form}, "warehouseIds[]") == "1014318"
     assert _form_value({"data": form}, "stockSkuStr") == "SKU-A\r\nSKU-B\r\n"
     assert _form_value({"data": form}, "statusIN[]") == "3"
-
-
-def test_parse_combo_sku_xlsx_and_hsp022_filter_rules(tmp_path) -> None:
-    xlsx_path = tmp_path / "combo.xlsx"
-    xlsx_path.write_bytes(
-        _combo_xlsx_bytes(
-            [
-                {
-                    "组合sku编码": "COMBO-A",
-                    "关联sku个数": 2,
-                    "关联sku编号1": "STOCK-A",
-                    "关联sku捆绑数量1": 1,
-                    "关联sku编号2": "STOCK-B",
-                    "关联sku捆绑数量2": 5,
-                },
-                {
-                    "组合sku编码": "HSP022",
-                    "关联sku个数": 1,
-                    "关联sku编号1": "STOCK-H",
-                    "关联sku捆绑数量1": 1,
-                },
-            ]
-        )
-    )
-
-    combo_map = inv.parse_combo_sku_xlsx(xlsx_path)
-    filtered_without_source_hsp = inv.filter_combo_map_for_source(combo_map, source_local_skus=["COMBO-A"])
-    filtered_with_source_hsp = inv.filter_combo_map_for_source(combo_map, source_local_skus=["COMBO-A", "HSP022"])
-
-    assert sorted(combo.combo_sku for combo in filtered_without_source_hsp.values()) == ["COMBO-A"]
-    assert sorted(combo.combo_sku for combo in filtered_with_source_hsp.values()) == ["COMBO-A", "HSP022"]
-    combo = filtered_without_source_hsp[inv.normalize_sku_key("COMBO-A")]
-    assert [(item.stock_sku, item.quantity) for item in combo.components] == [
-        ("STOCK-A", Decimal("1")),
-        ("STOCK-B", Decimal("5")),
-    ]
-
-
-def test_filter_combo_map_requires_hsp022_sentinel() -> None:
-    combo_map = {
-        inv.normalize_sku_key("COMBO-A"): inv.ComboSku(
-            combo_sku="COMBO-A",
-            components=(inv.ComboComponent("STOCK-A", Decimal("1")),),
-        )
-    }
-
-    with pytest.raises(inv.StoreMskuActualInventoryError, match="缺少哨兵SKU: HSP022"):
-        inv.filter_combo_map_for_source(combo_map, source_local_skus=["COMBO-A"])
 
 
 def test_parse_stock_inventory_sums_duplicate_stock_sku_rows(tmp_path) -> None:
@@ -757,32 +658,6 @@ def test_export_store_msku_actual_inventory_success_with_fake_network(monkeypatc
     )
     fake_session = _FakeSession(
         [
-            _FakeResponse({"ignored": "prewarm-list"}),
-            _FakeResponse({"ignored": "prewarm-template"}),
-            _FakeResponse({"success_type": 2, "sn": "sn-1", "subtask_num": 1, "chunkNum": 10000, "success": True}),
-            _FakeResponse({"updateR": True, "subO": [{"id": "1", "success": "1"}], "success": True}),
-            _FakeResponse({"async": True, "taskId": "task-1", "success": True}),
-            _FakeResponse({"success": True, "file_url": "https://cos.example.test/combo.xlsx", "state": 1}),
-            _FakeResponse(
-                body=_combo_xlsx_bytes(
-                    [
-                        {
-                            "组合sku编码": "COMBO-A",
-                            "关联sku个数": 2,
-                            "关联sku编号1": "STOCK-A",
-                            "关联sku捆绑数量1": 1,
-                            "关联sku编号2": "STOCK-B",
-                            "关联sku捆绑数量2": 2,
-                        },
-                        {
-                            "组合sku编码": "HSP022",
-                            "关联sku个数": 1,
-                            "关联sku编号1": "STOCK-H",
-                            "关联sku捆绑数量1": 1,
-                        },
-                    ]
-                )
-            ),
             _FakeResponse({"success": True}),
             _FakeResponse(
                 body=_stock_xlsx_bytes(
@@ -798,21 +673,27 @@ def test_export_store_msku_actual_inventory_success_with_fake_network(monkeypatc
     monkeypatch.setattr(inv, "erp_http_session", fake_session)
     monkeypatch.setattr(inv, "external_http_session", fake_session)
     monkeypatch.setattr(inv, "get_auth_context", _fake_auth_context)
+    async def fake_combos(store_name, rows):
+        assert store_name == "Amazon-Lerxiuer-FR"
+        return {"COMBO-A": inv.ComboSku("COMBO-A", (
+            inv.ComboComponent("STOCK-A", Decimal("1")),
+            inv.ComboComponent("STOCK-B", Decimal("2")),
+        ))}
+
+    monkeypatch.setattr(inv, "fetch_inventory_combos", fake_combos)
     monkeypatch.setattr(inv, "_timestamp_text", lambda *_args, **_kwargs: "202605271530")
     sleep_calls: list[float] = []
 
     async def fake_sleep(delay: float) -> None:
         sleep_calls.append(delay)
 
-    monkeypatch.setattr(inv.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
 
     result = asyncio.run(
         inv.export_store_msku_actual_inventory(
             "Amazon-Lerxiuer-FR",
             input_dir=tmp_path / "input",
             output_dir=tmp_path / "output",
-            timeout_sec=0,
-            poll_interval_sec=0.1,
         )
     )
 
@@ -856,18 +737,7 @@ def test_export_store_msku_actual_inventory_success_with_fake_network(monkeypatc
     assert _load_records(report_path, "无库存数据") == []
 
     post_calls = [call for call in fake_session.calls if call["method"] == "POST"]
-    assert [call["url"] for call in post_calls[:6]] == [
-        inv._combo_list_url(),
-        inv._combo_export_template_url(),
-        inv._combo_export_url(),
-        inv._combo_export_url(),
-        inv._combo_export_url(),
-        inv._combo_export_url(),
-    ]
-    assert sleep_calls == [1.0]
-    assert _form_value(post_calls[0], "stockData") == "SKU-A\r\nCOMBO-A\r\nHSP022"
-    assert _form_value(post_calls[1], "data") == "SKU-A\r\nCOMBO-A\r\nHSP022"
-    assert [_form_value(call, "step") for call in post_calls[2:6]] == ["1", "2", "3", "4"]
-    assert _form_value(post_calls[2], "orderIds") == "SKU-A\r\nCOMBO-A\r\nHSP022\r\n"
-    assert _form_value(post_calls[6], "stockSkuStr") == "SKU-A\r\nSTOCK-A\r\nSTOCK-B\r\n"
-    assert _form_value(post_calls[6], "warehouseIds[]") == "1014318"
+    assert len(post_calls) == 1
+    assert sleep_calls == []
+    assert _form_value(post_calls[0], "stockSkuStr") == "SKU-A\r\nSTOCK-A\r\nSTOCK-B\r\n"
+    assert _form_value(post_calls[0], "warehouseIds[]") == "1014318"

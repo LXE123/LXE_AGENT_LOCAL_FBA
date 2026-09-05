@@ -74,6 +74,13 @@ lxeskill replenish inventory actual-export --store-name "<店铺名>"
 }
 ```
 
+## 数据获取
+
+- 保留本地 MSKU Excel 中的销量和绑定。通过官方 Listing 分页识别本地 SKU 类型（1 库存、2 组合），仅对去重组合 SKU 获取子项和捆绑数量。
+- 需要桌面端配置 `LXE_DATA_SERVER_URL` 和 `LXE_DATA_SERVER_API_KEY`；深圳仓库查询仍需要马帮登录态。
+- 大店铺可能需要较长时间，命令总超时为 30 分钟；进度写入 stderr，以最终 terminal 为准。
+- Listing 无匹配、绑定变化或组合明细缺失时停止生成报告，按实际错误处理；不会回退到网页组合导出。源表绑定变化时需重新下载 MSKU 数据后重试。
+
 ## Result Handling
 
 - `success=true`：告诉用户真实库存（深圳仓库）报告已生成，并提供 `shenzhen_warehouse_inventory_report_xlsx_path`。

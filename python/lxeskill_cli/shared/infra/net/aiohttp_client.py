@@ -11,6 +11,7 @@ import aiohttp
 class HttpSessionPurpose(str, Enum):
     ERP = "erp"
     EXTERNAL = "external"
+    DATA_SERVICE = "data_service"
 
 
 @dataclass(frozen=True)
@@ -24,6 +25,10 @@ class HttpSessionOptions:
 
 
 _SESSION_OPTIONS: Dict[HttpSessionPurpose, HttpSessionOptions] = {
+    HttpSessionPurpose.DATA_SERVICE: HttpSessionOptions(
+        connector_limit=8, connector_limit_per_host=4, total_timeout_s=60,
+        keepalive_timeout_s=30, headers={"User-Agent": "RobotCoze-DataService/1.0"},
+    ),
     HttpSessionPurpose.ERP: HttpSessionOptions(
         connector_limit=64,
         connector_limit_per_host=32,
@@ -99,6 +104,7 @@ class HttpSessionProxy:
         return getattr(HttpSessionRegistry.get(self._purpose), name)
 
 
+data_service_http_session = HttpSessionProxy(HttpSessionPurpose.DATA_SERVICE)
 erp_http_session = HttpSessionProxy(HttpSessionPurpose.ERP)
 external_http_session = HttpSessionProxy(HttpSessionPurpose.EXTERNAL)
 
@@ -113,5 +119,6 @@ __all__ = [
     "HttpSessionRegistry",
     "close_all_aiohttp_sessions",
     "erp_http_session",
+    "data_service_http_session",
     "external_http_session",
 ]

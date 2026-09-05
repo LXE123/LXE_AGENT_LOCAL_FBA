@@ -4,6 +4,7 @@ from .aiohttp_client import (
     HttpSessionPurpose,
     close_all_aiohttp_sessions,
     erp_http_session,
+    data_service_http_session,
     external_http_session,
 )
 from .policy import (
@@ -34,6 +35,7 @@ __all__ = [
     "close_all_network_clients",
     "close_all_requests_sessions",
     "erp_http_session",
+    "data_service_http_session",
     "external_http_session",
     "external_requests_session",
     "local_service_requests_session",

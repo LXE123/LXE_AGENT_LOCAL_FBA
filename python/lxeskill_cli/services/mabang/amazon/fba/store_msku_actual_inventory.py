@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import re
 from collections import OrderedDict
@@ -12,37 +11,29 @@ from typing import Any
 
 from services.mabang import config as mabang_settings
 from services.mabang.auth_constants import (
-    MABANG_MEMCACHE_COOKIE_NAME as MEMCACHE_COOKIE_NAME,
-)
-from services.mabang.auth_constants import (
     PRIVATE_AMZ_HOST,
-    PRIVATE_HOST,
 )
 from services.mabang.export_common import configured_text as _configured_text
 from shared.infra.net import erp_http_session, external_http_session
 from shared.datasets import dataset_dir
 
+from .combo_sku import ComboComponent, ComboSku, fetch_inventory_combos, normalize_sku_key
+
 from ...auth import get_auth_context, refresh_mabang_auth
-from ...cookies import build_cookie_header, extract_named_cookies
+from ...cookies import build_cookie_header
 from ...errors import MabangAuthError, MabangBusinessError, MabangRequestError
 
 DEFAULT_STORE_MSKU_DIR = dataset_dir("replenish_store_msku")
 DEFAULT_OUTPUT_DIR = dataset_dir("replenish_actual_inventory")
-DEFAULT_COMBO_EXPORT_URL = "https://private.mabangerp.com/index.php?mod=combosku.doExportFileNew"
-DEFAULT_COMBO_LIST_URL = "https://private-amz.mabangerp.com/index.php?mod=combosku.getCombosSkuList"
-DEFAULT_COMBO_EXPORT_TEMPLATE_URL = "https://private.mabangerp.com/index.php"
 DEFAULT_WAREHOUSE_SEARCH_URL = "https://private-amz.mabangerp.com/index.php?mod=warehouse.searchwarehousestock"
 DEFAULT_WAREHOUSE_EXPORT_URL = (
     "https://private-amz.mabangerp.com/index.php?mod=warehouse.doexportwarehousestock&flag=1&showRmbColumn=0"
 )
-DEFAULT_PRIVATE_ORIGIN = "https://private.mabangerp.com"
-DEFAULT_PRIVATE_REFERER = "https://private.mabangerp.com/"
 DEFAULT_PRIVATE_AMZ_ORIGIN = "https://private-amz.mabangerp.com"
 DEFAULT_PRIVATE_AMZ_REFERER = "https://private-amz.mabangerp.com/"
 SOURCE = "mabang_store_msku_shenzhen_warehouse_inventory"
 EXCEL_ROW_HEIGHT = 15
 EXCEL_COLUMN_WIDTH = 15
-SENTINEL_COMBO_SKU = "HSP022"
 WAREHOUSE_ID = "1014318"
 WAREHOUSE_NAME = "深圳仓库"
 STORE_MSKU_FILE_SUFFIXES = ("店铺MSKU数据", "msku_data")
@@ -56,7 +47,6 @@ SOURCE_FILE_RE = re.compile(
     rf"^(?P<source_time>\d{{12}})-(?P<store>.+)_(?:{'|'.join(re.escape(suffix) for suffix in STORE_MSKU_FILE_SUFFIXES)})\.xlsx$",
     re.IGNORECASE,
 )
-WHITESPACE_PATTERN = re.compile(r"\s+")
 AUTH_FAIL_STATUS = {401, 403}
 SALES_COLUMNS = ("7天销量", "14天销量", "30天销量")
 FBA_STOCK_COLUMNS = ("可售", "待入库", "预留", "在途", "待调仓", "调仓中")
@@ -64,8 +54,6 @@ SOURCE_COLUMNS = ("MSKU", "父ASIN", "ASIN", "本地SKU", "商品链接", *SALES
 SOURCE_LOCAL_SKU_NAME_COLUMN = "本地SKU名称"
 SOURCE_PRODUCT_NAME_COLUMN = "产品名称"
 SOURCE_REMARK_COLUMN = "备注"
-COMBO_SKU_COLUMN = "组合sku编码"
-COMBO_COMPONENT_COUNT_COLUMN = "关联sku个数"
 STOCK_SKU_COLUMN = "库存SKU编号"
 AVAILABLE_STOCK_COLUMN = "可用库存量"
 BASE_OUTPUT_COLUMNS = (
@@ -99,11 +87,6 @@ OUTPUT_COLUMNS = BASE_OUTPUT_COLUMNS
 TWO_DECIMAL_COLUMNS = {"加权日销", "可销售天数"}
 ACTUAL_INVENTORY_HIGHLIGHT_COLOR = "FFF2CC"
 INVENTORY_HIGHLIGHT_COLUMNS = {"MSKU", ACTUAL_INVENTORY_QUANTITY_COLUMN}
-COMBO_EXPORT_FIELDS: tuple[tuple[str, str], ...] = (
-    (COMBO_SKU_COLUMN, "uq101"),
-    (COMBO_COMPONENT_COUNT_COLUMN, "uq136"),
-    ("关联sku信息", "uq138"),
-)
 
 
 class StoreMskuActualInventoryError(MabangBusinessError):
@@ -111,10 +94,6 @@ class StoreMskuActualInventoryError(MabangBusinessError):
 
 
 class StoreMskuActualInventoryAuthError(StoreMskuActualInventoryError, MabangAuthError):
-    pass
-
-
-class StoreMskuActualInventoryTimeoutError(StoreMskuActualInventoryError):
     pass
 
 
@@ -144,18 +123,6 @@ class StoreMskuRow:
     fba_in_transit: Decimal = Decimal("0")
     fba_pending_transfer: Decimal = Decimal("0")
     fba_transferring: Decimal = Decimal("0")
-
-
-@dataclass(frozen=True)
-class ComboComponent:
-    stock_sku: str
-    quantity: Decimal
-
-
-@dataclass(frozen=True)
-class ComboSku:
-    combo_sku: str
-    components: tuple[ComboComponent, ...]
 
 
 @dataclass(frozen=True)
@@ -231,10 +198,6 @@ def _clean_text(value: Any) -> str:
     if text.lower() == "nan":
         return ""
     return text
-
-
-def normalize_sku_key(value: Any) -> str:
-    return WHITESPACE_PATTERN.sub("", _clean_text(value))
 
 
 def _safe_file_part(value: Any) -> str:
@@ -398,17 +361,6 @@ def load_store_msku_rows(xlsx_path: str | Path) -> list[StoreMskuRow]:
     return rows
 
 
-def _private_request_headers(cookie_header: str) -> dict[str, str]:
-    return {
-        "Accept": "application/json, text/javascript, */*; q=0.01",
-        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-        "X-Requested-With": "XMLHttpRequest",
-        "Origin": _configured_text("MABANG_COMBO_SKU_EXPORT_ORIGIN", DEFAULT_PRIVATE_ORIGIN),
-        "Referer": _configured_text("MABANG_COMBO_SKU_EXPORT_REFERER", DEFAULT_PRIVATE_REFERER),
-        "Cookie": cookie_header,
-    }
-
-
 def _private_amz_post_headers(cookie_header: str) -> dict[str, str]:
     return {
         "Accept": "application/json, text/javascript, */*; q=0.01",
@@ -416,15 +368,6 @@ def _private_amz_post_headers(cookie_header: str) -> dict[str, str]:
         "X-Requested-With": "XMLHttpRequest",
         "Origin": _configured_text("MABANG_WAREHOUSE_STOCK_ORIGIN", DEFAULT_PRIVATE_AMZ_ORIGIN),
         "Referer": _configured_text("MABANG_WAREHOUSE_STOCK_REFERER", DEFAULT_PRIVATE_AMZ_REFERER),
-        "Cookie": cookie_header,
-    }
-
-
-def _private_html_post_headers(cookie_header: str) -> dict[str, str]:
-    return {
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Content-Type": "application/x-www-form-urlencoded",
-        "Origin": "null",
         "Cookie": cookie_header,
     }
 
@@ -484,33 +427,6 @@ async def _read_optional_json_response(resp: Any, *, action: str) -> dict[str, A
     return data if isinstance(data, dict) else {}
 
 
-async def _read_http_ok_response(resp: Any, *, action: str) -> None:
-    status_code = int(getattr(resp, "status", 0) or 0)
-    text = await resp.text()
-    if status_code in AUTH_FAIL_STATUS:
-        raise StoreMskuActualInventoryAuthError(f"{action}鉴权失败(status={status_code})")
-    if status_code < 200 or status_code >= 300:
-        msg = text[:300] if text else "empty response"
-        raise MabangRequestError(f"{action}请求失败(status={status_code}): {msg}")
-
-
-async def _resolve_private_auth() -> tuple[str, str]:
-    context = await get_auth_context()
-    cookie_header = build_cookie_header(
-        context.cookies_by_domain,
-        request_host=PRIVATE_HOST,
-        extra_cookies={"exportv2": "1"},
-    )
-    if not cookie_header:
-        raise StoreMskuActualInventoryAuthError("未获取到 private.mabangerp.com Cookie")
-
-    values = extract_named_cookies(context.cookies_by_domain, (MEMCACHE_COOKIE_NAME,))
-    memcache_key = _clean_text(values.get(MEMCACHE_COOKIE_NAME))
-    if not memcache_key:
-        raise StoreMskuActualInventoryAuthError(f"缺少关键 Cookie: {MEMCACHE_COOKIE_NAME}")
-    return cookie_header, memcache_key
-
-
 async def _resolve_private_amz_cookie() -> str:
     context = await get_auth_context(purpose="store_msku_actual_inventory_download")
     cookie_header = build_cookie_header(
@@ -523,18 +439,6 @@ async def _resolve_private_amz_cookie() -> str:
     return cookie_header
 
 
-def _combo_export_url() -> str:
-    return _configured_text("MABANG_COMBO_SKU_EXPORT_URL", DEFAULT_COMBO_EXPORT_URL)
-
-
-def _combo_list_url() -> str:
-    return _configured_text("MABANG_COMBO_SKU_LIST_URL", DEFAULT_COMBO_LIST_URL)
-
-
-def _combo_export_template_url() -> str:
-    return _configured_text("MABANG_COMBO_SKU_EXPORT_TEMPLATE_URL", DEFAULT_COMBO_EXPORT_TEMPLATE_URL)
-
-
 def _warehouse_search_url() -> str:
     return _configured_text("MABANG_WAREHOUSE_STOCK_SEARCH_URL", DEFAULT_WAREHOUSE_SEARCH_URL)
 
@@ -543,231 +447,8 @@ def _warehouse_export_url() -> str:
     return _configured_text("MABANG_WAREHOUSE_STOCK_EXPORT_URL", DEFAULT_WAREHOUSE_EXPORT_URL)
 
 
-def combo_query_skus(local_skus: list[str] | tuple[str, ...]) -> list[str]:
-    return _unique_text([*list(local_skus or []), SENTINEL_COMBO_SKU])
-
-
 def _ids_lines(values: list[str]) -> str:
     return "\r\n".join(values) + "\r\n"
-
-
-def _ids_text(values: list[str]) -> str:
-    return "\r\n".join(values)
-
-
-def _combo_list_prewarm_form_data(local_skus: list[str]) -> list[tuple[str, str]]:
-    return [
-        ("searchLike", "comboSku"),
-        ("operate", "Like"),
-        ("searchKeywords", ""),
-        ("labelId", ""),
-        ("timeStart", ""),
-        ("timeEnd", ""),
-        ("searchStatus", ""),
-        ("isBatchSearch", "1"),
-        ("selecttype", "comboSku"),
-        ("stockData", _ids_text(combo_query_skus(local_skus))),
-        ("page", ""),
-        ("rowsPerPage", ""),
-    ]
-
-
-def _combo_export_template_prewarm_form_data(local_skus: list[str]) -> list[tuple[str, str]]:
-    return [
-        ("mod", "export.exportTemplate"),
-        ("data", _ids_text(combo_query_skus(local_skus))),
-        ("type", "1"),
-        ("menu", "combosku"),
-        ("exportUrl", _combo_export_url()),
-        ("sessid", ""),
-        ("showRmbColumn", "2"),
-    ]
-
-
-def _combo_step1_form_data(local_skus: list[str], *, memcache_key: str) -> list[tuple[str, str]]:
-    query_skus = combo_query_skus(local_skus)
-    form: list[tuple[str, str]] = [
-        ("backUrl", ""),
-        ("orderIds", _ids_lines(query_skus)),
-    ]
-    form.extend(("fieldlabel", uq) for _, uq in COMBO_EXPORT_FIELDS)
-    for name, uq in COMBO_EXPORT_FIELDS:
-        form.extend(
-            [
-                ("map-name[]", name),
-                ("map-uq[]", uq),
-                ("map-text[]", ""),
-            ]
-        )
-    form.extend(
-        [
-            ("templateName", ""),
-            ("templateId", "0"),
-            ("datasOpen", "1"),
-            ("memcacheKey", memcache_key),
-            ("showRmbColumn", "2"),
-            ("pageSave", "1"),
-            ("operateType", "19"),
-            ("params", ""),
-            ("InterfaceUrl", ""),
-            ("mainMenu", ""),
-            ("hiddenPage", "1"),
-            ("hiddenPageSize", ""),
-            ("tableBase", ""),
-            ("isMerage", "1"),
-            ("version", "v2"),
-            ("step", "1"),
-        ]
-    )
-    return form
-
-
-def _step2_form_data(*, sn: str, sub_no: int) -> list[tuple[str, str]]:
-    return [
-        ("tableBase", ""),
-        ("isMerage", "1"),
-        ("version", "v2"),
-        ("sn", sn),
-        ("sub_no", str(sub_no)),
-        ("step", "2"),
-        ("1", "1"),
-    ]
-
-
-def _step3_form_data(*, sn: str) -> list[tuple[str, str]]:
-    return [
-        ("tableBase", ""),
-        ("isMerage", "1"),
-        ("sn", sn),
-        ("version", "v2"),
-        ("step", "3"),
-        ("1", "1"),
-    ]
-
-
-def _step4_form_data(*, sn: str, task_id: str) -> list[tuple[str, str]]:
-    return [
-        ("tableBase", ""),
-        ("isMerage", "1"),
-        ("sn", sn),
-        ("version", "v2"),
-        ("step", "4"),
-        ("taskId", task_id),
-        ("1", "1"),
-    ]
-
-
-async def _post_combo_export(
-    form_data: list[tuple[str, str]],
-    *,
-    action: str,
-) -> dict[str, Any]:
-    cookie_header, memcache_key = await _resolve_private_auth()
-    active_form_data = [
-        (name, memcache_key if name == "memcacheKey" else value)
-        for name, value in form_data
-    ]
-    async with erp_http_session.post(
-        _combo_export_url(),
-        data=active_form_data,
-        headers=_private_request_headers(cookie_header),
-    ) as resp:
-        return await _read_json_response(resp, action=action)
-
-
-async def prewarm_combo_sku_export(
-    local_skus: list[str],
-    *,
-    delay_sec: float = 1.0,
-) -> None:
-    private_amz_cookie_header = await _resolve_private_amz_cookie()
-    async with erp_http_session.post(
-        _combo_list_url(),
-        data=_combo_list_prewarm_form_data(local_skus),
-        headers=_private_amz_post_headers(private_amz_cookie_header),
-    ) as resp:
-        await _read_http_ok_response(resp, action="组合SKU预热 1")
-
-    await asyncio.sleep(max(0.0, float(delay_sec)))
-
-    private_cookie_header, _ = await _resolve_private_auth()
-    async with erp_http_session.post(
-        _combo_export_template_url(),
-        data=_combo_export_template_prewarm_form_data(local_skus),
-        headers=_private_html_post_headers(private_cookie_header),
-    ) as resp:
-        await _read_http_ok_response(resp, action="组合SKU预热 2")
-
-
-def _int_value(value: Any) -> int | None:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _normalize_step1_response(payload: dict[str, Any]) -> tuple[str, int, int | None]:
-    sn = _clean_text(payload.get("sn"))
-    if not sn:
-        raise StoreMskuActualInventoryError("组合SKU导出 Step 1 返回缺少 sn")
-    subtask_num = _int_value(payload.get("subtask_num"))
-    if not subtask_num or subtask_num <= 0:
-        raise StoreMskuActualInventoryError(f"组合SKU导出 Step 1 返回 subtask_num 无效: {payload.get('subtask_num')}")
-    chunk_num = _int_value(payload.get("chunkNum"))
-    return sn, subtask_num, chunk_num
-
-
-def _validate_step2_response(payload: dict[str, Any], *, sub_no: int) -> None:
-    sub_items = payload.get("subO")
-    if not isinstance(sub_items, list) or not sub_items:
-        raise StoreMskuActualInventoryError(f"组合SKU导出 Step 2 返回缺少 subO: sub_no={sub_no}")
-    for item in sub_items:
-        if not isinstance(item, dict):
-            raise StoreMskuActualInventoryError(f"组合SKU导出 Step 2 返回 subO 格式异常: sub_no={sub_no}")
-        if _clean_text(item.get("success")) != "1":
-            raise StoreMskuActualInventoryError(f"组合SKU导出 Step 2 失败: sub_no={sub_no}, subO={item}")
-
-
-def _normalize_step3_response(payload: dict[str, Any]) -> str:
-    task_id = _clean_text(payload.get("taskId"))
-    if not task_id:
-        raise StoreMskuActualInventoryError("组合SKU导出 Step 3 返回缺少 taskId")
-    return task_id
-
-
-async def _wait_for_combo_file_url(
-    *,
-    sn: str,
-    task_id: str,
-    timeout_sec: float,
-    poll_interval_sec: float,
-) -> str:
-    safe_timeout = max(0.0, float(timeout_sec))
-    safe_interval = max(0.1, float(poll_interval_sec))
-    deadline = asyncio.get_running_loop().time() + safe_timeout
-    last_state = "unknown"
-
-    while True:
-        payload = await _post_combo_export(
-            _step4_form_data(sn=sn, task_id=task_id),
-            action="组合SKU导出 Step 4",
-        )
-        state = _clean_text(payload.get("state"))
-        last_state = state or "unknown"
-        file_url = _clean_text(payload.get("file_url"))
-        if state == "1":
-            if not file_url:
-                raise StoreMskuActualInventoryError(f"组合SKU导出完成但缺少 file_url: taskId={task_id}")
-            return file_url
-
-        now = asyncio.get_running_loop().time()
-        if now >= deadline:
-            break
-        await asyncio.sleep(min(safe_interval, max(0.0, deadline - now)))
-
-    raise StoreMskuActualInventoryTimeoutError(
-        f"组合SKU导出超时(taskId={task_id}, timeout={safe_timeout:g}s, last_state={last_state})"
-    )
 
 
 async def _download_xlsx_from_url(file_url: str, target_path: Path, *, action: str) -> Path:
@@ -788,111 +469,6 @@ async def _download_xlsx_from_url(file_url: str, target_path: Path, *, action: s
             raise StoreMskuActualInventoryError(f"{action}返回空文件")
     target_path.write_bytes(body)
     return target_path
-
-
-async def export_combo_sku_xlsx(
-    local_skus: list[str],
-    *,
-    store_name: str,
-    output_dir: str | Path | None = None,
-    timeout_sec: float = 180,
-    poll_interval_sec: float = 3,
-) -> Path:
-    step1 = await _post_combo_export(
-        _combo_step1_form_data(local_skus, memcache_key=""),
-        action="组合SKU导出 Step 1",
-    )
-    sn, subtask_num, _chunk_num = _normalize_step1_response(step1)
-    for sub_no in range(1, subtask_num + 1):
-        step2 = await _post_combo_export(
-            _step2_form_data(sn=sn, sub_no=sub_no),
-            action="组合SKU导出 Step 2",
-        )
-        _validate_step2_response(step2, sub_no=sub_no)
-    step3 = await _post_combo_export(
-        _step3_form_data(sn=sn),
-        action="组合SKU导出 Step 3",
-    )
-    task_id = _normalize_step3_response(step3)
-    file_url = await _wait_for_combo_file_url(
-        sn=sn,
-        task_id=task_id,
-        timeout_sec=timeout_sec,
-        poll_interval_sec=poll_interval_sec,
-    )
-    directory = _resolve_output_dir(output_dir)
-    target_path = directory / f"{_timestamp_text()}-{_safe_file_part(store_name)}_combo_sku.xlsx"
-    return await _download_xlsx_from_url(file_url, target_path, action="下载组合SKU导出xlsx")
-
-
-def parse_combo_sku_xlsx(xlsx_path: str | Path) -> dict[str, ComboSku]:
-    try:
-        from openpyxl import load_workbook
-    except Exception as exc:
-        raise RuntimeError("缺少 openpyxl 依赖，无法读取组合SKU导出xlsx") from exc
-
-    source_path = Path(xlsx_path)
-    if not source_path.is_file():
-        raise FileNotFoundError(f"组合SKU导出xlsx不存在: {source_path}")
-
-    workbook = None
-    try:
-        workbook = load_workbook(source_path, read_only=True, data_only=True)
-        worksheet = workbook.worksheets[0]
-        rows = worksheet.iter_rows(values_only=True)
-        headers = [_clean_text(cell) for cell in list(next(rows, None) or [])]
-        missing = [column for column in (COMBO_SKU_COLUMN, COMBO_COMPONENT_COUNT_COLUMN) if column not in headers]
-        if missing:
-            raise StoreMskuActualInventoryError(f"组合SKU导出xlsx缺少列: {', '.join(missing)}")
-
-        combos: dict[str, ComboSku] = {}
-        for values in rows:
-            row = dict(zip(headers, list(values or []), strict=False))
-            combo_sku = _clean_text(row.get(COMBO_SKU_COLUMN))
-            if not combo_sku:
-                continue
-            component_count = _int_value(row.get(COMBO_COMPONENT_COUNT_COLUMN))
-            if component_count is None or component_count <= 0:
-                raise StoreMskuActualInventoryError(f"组合SKU关联sku个数无效: {combo_sku}")
-            components: list[ComboComponent] = []
-            for index in range(1, component_count + 1):
-                stock_sku_column = f"关联sku编号{index}"
-                quantity_column = f"关联sku捆绑数量{index}"
-                if stock_sku_column not in headers or quantity_column not in headers:
-                    raise StoreMskuActualInventoryError(
-                        f"组合SKU导出xlsx缺少列: {stock_sku_column}, {quantity_column}"
-                    )
-                stock_sku = _clean_text(row.get(stock_sku_column))
-                quantity = _decimal_value(row.get(quantity_column), default=Decimal("0"))
-                if not stock_sku:
-                    raise StoreMskuActualInventoryError(f"组合SKU缺少关联sku编号: {combo_sku}, index={index}")
-                if quantity <= 0:
-                    raise StoreMskuActualInventoryError(f"组合SKU关联sku捆绑数量无效: {combo_sku}, {stock_sku}")
-                components.append(ComboComponent(stock_sku=stock_sku, quantity=quantity))
-            combos[normalize_sku_key(combo_sku)] = ComboSku(combo_sku=combo_sku, components=tuple(components))
-    except StoreMskuActualInventoryError:
-        raise
-    except Exception as exc:
-        raise RuntimeError(f"读取组合SKU导出xlsx失败: {source_path}, error={exc}") from exc
-    finally:
-        try:
-            if workbook is not None:
-                workbook.close()
-        except Exception:
-            pass
-    return combos
-
-
-def filter_combo_map_for_source(
-    combo_map: dict[str, ComboSku],
-    *,
-    source_local_skus: list[str],
-) -> dict[str, ComboSku]:
-    sentinel_key = normalize_sku_key(SENTINEL_COMBO_SKU)
-    if sentinel_key not in combo_map:
-        raise StoreMskuActualInventoryError(f"组合SKU导出结果缺少哨兵SKU: {SENTINEL_COMBO_SKU}")
-    source_keys = {normalize_sku_key(sku) for sku in source_local_skus if normalize_sku_key(sku)}
-    return {key: combo for key, combo in combo_map.items() if key in source_keys}
 
 
 def _warehouse_search_form_data(stock_skus: list[str]) -> list[tuple[str, str]]:
@@ -1244,8 +820,6 @@ async def _export_store_msku_actual_inventory_once(
     *,
     input_dir: str | Path | None = None,
     output_dir: str | Path | None = None,
-    timeout_sec: float = 180,
-    poll_interval_sec: float = 3,
 ) -> ActualInventoryResult:
     clean_store_name = normalize_store_name(store_name)
     source = find_latest_store_msku_file(clean_store_name, input_dir=input_dir)
@@ -1253,23 +827,21 @@ async def _export_store_msku_actual_inventory_once(
     local_skus = _unique_text([row.local_sku for row in msku_rows])
 
     output_directory = _resolve_output_dir(output_dir)
-    await prewarm_combo_sku_export(local_skus)
-    combo_xlsx_path = await export_combo_sku_xlsx(
-        local_skus,
-        store_name=clean_store_name,
-        output_dir=output_directory,
-        timeout_sec=timeout_sec,
-        poll_interval_sec=poll_interval_sec,
-    )
-    combo_map = filter_combo_map_for_source(parse_combo_sku_xlsx(combo_xlsx_path), source_local_skus=local_skus)
+    combo_map = await fetch_inventory_combos(clean_store_name, msku_rows)
     stock_skus = stock_skus_for_inventory(local_skus, combo_map)
 
-    await search_warehouse_stock(stock_skus)
-    stock_xlsx_path = await download_warehouse_stock_xlsx(
-        store_name=clean_store_name,
-        output_dir=output_directory,
-    )
-    stock_quantities = parse_stock_inventory_xlsx(stock_xlsx_path)
+    async def warehouse_once() -> dict[str, Decimal]:
+        await search_warehouse_stock(stock_skus)
+        stock_xlsx_path = await download_warehouse_stock_xlsx(
+            store_name=clean_store_name, output_dir=output_directory,
+        )
+        return parse_stock_inventory_xlsx(stock_xlsx_path)
+
+    try:
+        stock_quantities = await warehouse_once()
+    except StoreMskuActualInventoryAuthError:
+        await refresh_mabang_auth(purpose="store_msku_actual_inventory_auth_retry")
+        stock_quantities = await warehouse_once()
     inventory_rows, missing_stock_skus = calculate_inventory_rows(
         msku_rows,
         combo_map=combo_map,
@@ -1299,36 +871,23 @@ async def export_store_msku_actual_inventory(
     *,
     input_dir: str | Path | None = None,
     output_dir: str | Path | None = None,
-    timeout_sec: float = 180,
-    poll_interval_sec: float = 3,
 ) -> ActualInventoryResult:
-    async def run_once() -> ActualInventoryResult:
-        return await _export_store_msku_actual_inventory_once(
-            store_name,
-            input_dir=input_dir,
-            output_dir=output_dir,
-            timeout_sec=timeout_sec,
-            poll_interval_sec=poll_interval_sec,
-        )
-
-    try:
-        return await run_once()
-    except StoreMskuActualInventoryAuthError:
-        await refresh_mabang_auth(purpose="store_msku_actual_inventory_auth_retry")
-        return await run_once()
+    return await _export_store_msku_actual_inventory_once(
+        store_name, input_dir=input_dir, output_dir=output_dir,
+    )
 
 
 __all__ = [
+    "ComboSku",
+    "ComboComponent",
+    "normalize_sku_key",
     "AVAILABLE_STOCK_COLUMN",
     "ACTUAL_INVENTORY_FILE_SUFFIX",
     "BASE_OUTPUT_COLUMNS",
-    "COMBO_EXPORT_FIELDS",
-    "COMBO_SKU_COLUMN",
     "FBA_STOCK_COLUMNS",
     "INVENTORY_OUTPUT_COLUMNS",
     "OUTPUT_COLUMNS",
     "SALES_COLUMNS",
-    "SENTINEL_COMBO_SKU",
     "SOURCE",
     "STOCK_SKU_COLUMN",
     "STORE_MSKU_FILE_SUFFIXES",
@@ -1337,28 +896,18 @@ __all__ = [
     "ActualInventoryResult",
     "ActualInventoryRow",
     "ActualInventoryRowGroups",
-    "ComboComponent",
-    "ComboSku",
     "StoreMskuActualInventoryAuthError",
     "StoreMskuActualInventoryError",
-    "StoreMskuActualInventoryTimeoutError",
     "StoreMskuRow",
     "calculate_inventory_rows",
-    "combo_query_skus",
-    "export_combo_sku_xlsx",
     "export_store_msku_actual_inventory",
-    "filter_combo_map_for_source",
     "find_latest_store_msku_file",
     "load_store_msku_rows",
-    "normalize_sku_key",
-    "parse_combo_sku_xlsx",
     "parse_stock_inventory_xlsx",
-    "prewarm_combo_sku_export",
     "search_warehouse_stock",
     "split_inventory_rows",
     "stock_skus_for_inventory",
     "write_actual_inventory_xlsx",
-    "_combo_step1_form_data",
     "_timestamp_text",
     "_warehouse_search_form_data",
 ]

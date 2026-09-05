@@ -303,7 +303,7 @@
       "command_path": ["replenish", "inventory", "actual-export"],
       "legacy_aliases": ["mabang_export_store_msku_actual_inventory"],
       "visibility": "business", "session_mode": "none",
-      "owner_skills": ["replenishment-real-inventory-report"], "artifact_paths": [{"field": "shenzhen_warehouse_inventory_report_xlsx_path", "role": "deliverable"}], "timeout_ms": 300000, "exposed": true,
+      "owner_skills": ["replenishment-real-inventory-report"], "artifact_paths": [{"field": "shenzhen_warehouse_inventory_report_xlsx_path", "role": "deliverable"}], "timeout_ms": 1800000, "exposed": true,
       "input_schema": {"type": "object", "properties": {"store_name": {"type": "string"}}, "required": ["store_name"], "additionalProperties": false}
     },
     {
