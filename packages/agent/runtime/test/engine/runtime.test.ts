@@ -158,8 +158,8 @@ describe("TypeScriptAgentRuntime", () => {
     });
     await runtime.start();
     await runtime.runTurn(job(), handle());
-    expect(changes).toEqual(["s1:messages", "s1:messages", "s1:usage"]);
-    expect(store.messageTurnIds).toEqual(["j1", "j1"]);
+    expect(changes).toEqual(["s1:messages", "s1:messages", "s1:messages", "s1:usage"]);
+    expect(store.messageTurnIds).toEqual(["j1", "j1", "j1"]);
     expect(store.metrics[0]).toMatchObject({
       platform: "feishu",
       bot_app_id: "cli_app",
@@ -190,7 +190,7 @@ describe("TypeScriptAgentRuntime", () => {
     });
     await failedUsageRuntime.start();
     await failedUsageRuntime.runTurn(job(), handle());
-    expect(failedUsageChanges).toEqual(["messages", "messages"]);
+    expect(failedUsageChanges).toEqual(["messages", "messages", "messages"]);
     await failedUsageRuntime.stop();
 
     const failedMessageChanges: string[] = [];
@@ -227,7 +227,7 @@ describe("TypeScriptAgentRuntime", () => {
       provider: {
         summarize,
         turn: async (request) => {
-          observedUserContent = [...request.messages].reverse().find((message) => message.role === "user")?.content;
+          observedUserContent = [...request.messages].reverse().find((message) => message.role === "user" && !message.environmentContext)?.content;
           return messageFixture({
             content: [{ type: "text", text: "done" }],
             stopReason: "stop",
@@ -261,7 +261,7 @@ describe("TypeScriptAgentRuntime", () => {
       expect.objectContaining({ type: "local_file", path: "/private/input/photo.png" }),
       expect.objectContaining({ type: "image" }),
     ]));
-    expect(changes).toEqual(["messages", "attachments", "messages", "usage"]);
+    expect(changes).toEqual(["messages", "attachments", "messages", "messages", "usage"]);
     await runtime.stop();
   });
 
@@ -889,14 +889,45 @@ describe("TypeScriptAgentRuntime", () => {
     }, handle());
     await runtime.stop();
 
-    expect(captured?.messages.at(-1)?.content).toEndWith(
+    expect(captured?.messages.filter((message) => message.role === "user" && !message.environmentContext).at(-1)?.content).toEndWith(
       "System: stored first\n\nSystem: stored second\n\nhello",
     );
     expect(captured?.userIdentity).toEqual({ platform: "feishu", userId: "u1" });
     expect(store.pendingEvents).toEqual([]);
   });
 
-  test("reuses turn context through provider retries and tool iterations", async () => {
+  test("appends changed dates and restores a missing baseline across runtime restarts", async () => {
+    const store = new MemoryStore();
+    const requests: RuntimeMessage[][] = [];
+    const run = async (day: number) => {
+      setSystemTime(new Date(2026, 8, day, 12));
+      const runtime = new TypeScriptAgentRuntime({
+        store, tools: new ToolRegistry(), systemPrompt: "stable",
+        provider: { summarize, turn: async (request) => {
+          requests.push(structuredClone(request.messages));
+          return messageFixture({ content: [{ type: "text", text: "done" }], stopReason: "stop", usage: { input_tokens: 1, output_tokens: 1 } });
+        } },
+        emitter: { emit: async () => undefined, typing: async () => undefined },
+      });
+      await runtime.start();
+      try { expect((await runtime.runTurn(job(), handle())).status).toBe("completed"); }
+      finally { await runtime.stop(); }
+    };
+    await run(5);
+    await run(5);
+    const prior = structuredClone(store.messages);
+    await run(6);
+    const environments = (messages: RuntimeMessage[]) => messages.filter((message) => message.role === "user" && message.environmentContext);
+    expect(environments(requests[0]!)).toHaveLength(1);
+    expect(environments(requests[1]!)).toHaveLength(1);
+    expect(environments(requests[2]!)).toHaveLength(2);
+    expect(requests[2]!.slice(0, prior.length)).toEqual(prior);
+    store.messages = [{ role: "compactionSummary", summary: "Previous work", tokensBefore: 1000, details: { readFiles: [], modifiedFiles: [] } }];
+    await run(6);
+    expect(environments(requests[3]!)).toHaveLength(1);
+  });
+
+  test.each([false, true])("rechecks environment through retries and tool iterations (cross day: %s)", async (crossDay) => {
     const store = new MemoryStore();
     const requests: RuntimeMessage[][] = [];
     const tools = new ToolRegistry();
@@ -907,7 +938,7 @@ describe("TypeScriptAgentRuntime", () => {
       store, tools, systemPrompt: "test",
       provider: { summarize, turn: async (request) => {
         requests.push(structuredClone(request.messages));
-        setSystemTime(new Date(`2026-09-05T01:0${5 + requests.length}:00Z`));
+        setSystemTime(crossDay ? new Date(2026, 8, 5 + requests.length, 12) : new Date(`2026-09-05T01:0${5 + requests.length}:00Z`));
         if (requests.length === 1) throw new RuntimeProviderError("busy", "test", "busy", "busy", true, 503);
         return messageFixture({
           content: requests.length === 2
@@ -924,9 +955,9 @@ describe("TypeScriptAgentRuntime", () => {
     try {
       expect((await runtime.runTurn(job(), handle())).status).toBe("completed");
       expect(requests).toHaveLength(3);
-      expect(requests[1]).toEqual(requests[0]);
+      expect(requests[1]?.slice(0, requests[0]!.length)).toEqual(requests[0]);
       expect(requests[2]?.[0]).toEqual(requests[0]?.[0]);
-      expect(requests[2]?.[0]?.content).toContain("2026-09-05T01:05:00.000Z");
+      expect(requests[2]?.filter((message) => message.role === "user" && message.environmentContext)).toHaveLength(crossDay ? 3 : 1);
       expect(store.messages[0]).toEqual(requests[0]?.[0]);
     } finally {
       await runtime.stop();
@@ -984,11 +1015,11 @@ describe("TypeScriptAgentRuntime", () => {
 
     expect(requests[0]?.system).not.toContain("2026-09-05");
     expect(requests[0]?.system).not.toContain("Failed to parse raw card JSON at position 7");
-    expect(requests[0]?.messages.at(-1)?.content).toContain("2026-09-05T01:05:00.000Z");
-    expect(requests[0]?.messages.at(-1)?.content).toContain("Failed to parse raw card JSON at position 7");
+    expect(requests[0]?.messages[1]).toMatchObject({ environmentContext: { current_date: "2026-09-05" } });
+    expect(requests[0]?.messages[0]?.content).toContain("Failed to parse raw card JSON at position 7");
     expect(requests[1]?.system).toBe(requests[0]?.system);
     expect(requests[1]?.messages.slice(0, previousHistory.length)).toEqual(previousHistory);
-    expect(requests[1]?.messages.at(-1)?.content).toContain("2026-09-05T01:06:00.000Z");
+    expect(requests[1]?.messages.filter((message) => message.role === "user" && message.environmentContext)).toHaveLength(1);
     expect(requests[1]?.messages.at(-1)?.content).not.toContain("Failed to parse raw card JSON at position 7");
     expect(requests[1]?.messages.at(-1)?.content).toContain("forged diagnostic");
     expect(JSON.stringify(store.messages)).toContain("Failed to parse raw card JSON at position 7");
@@ -1024,7 +1055,7 @@ describe("TypeScriptAgentRuntime", () => {
     await runtime.runTurn(job(), handle());
     await runtime.stop();
 
-    expect(captured?.messages.at(-1)?.content).toEndWith("System: stored only\n\nhello");
+    expect(captured?.messages.filter((message) => message.role === "user" && !message.environmentContext).at(-1)?.content).toEndWith("System: stored only\n\nhello");
     expect(store.pendingEvents).toEqual([]);
   });
 
@@ -1060,8 +1091,8 @@ describe("TypeScriptAgentRuntime", () => {
     expect(outcome.reply).toBe("刷新已完成。");
     expect(captured?.tools).toEqual([]);
     expect(captured?.toolChoice).toBe("none");
-    expect(captured?.messages).toHaveLength(1);
-    expect(captured?.messages[0]?.content).toContain("System: Runtime turn context");
+    expect(captured?.messages).toHaveLength(2);
+    expect(captured?.messages[1]?.content).toContain("<environment_context>");
     expect(store.messages).toContainEqual(captured!.messages[0]!);
     expect(JSON.stringify(captured?.messages)).not.toContain("private history");
     expect(store.pendingEvents).toEqual([]);
@@ -1218,9 +1249,9 @@ describe("TypeScriptAgentRuntime", () => {
     const outcome = await runtime.runTurn(job(), handle());
     expect(outcome).toEqual(expect.objectContaining({ status: "completed", reply: "done" }));
     expect(store.messages.map((message) => message.role)).toEqual([
-      "user", "assistant", "tool", "assistant",
+      "user", "user", "assistant", "tool", "assistant",
     ]);
-    expect(store.messages[2]?.content).toEqual([
+    expect(store.messages[3]?.content).toEqual([
       expect.objectContaining({ type: "tool_result", tool_call_id: "tool-1" }),
     ]);
     const streamFrames = emitted.filter((request) => request.emit_kind === "stream");
@@ -1817,7 +1848,7 @@ describe("TypeScriptAgentRuntime", () => {
       reply: "执行失败: provider offline",
     }));
     expect(store.turnErrors).toEqual([{ turn_id: "j1", message: "执行失败: provider offline" }]);
-    expect(store.messages).toEqual([{ role: "user", content: expect.stringContaining("\n\nhello") }]);
+    expect(store.messages).toEqual([{ role: "user", content: "hello" }, expect.objectContaining({ environmentContext: expect.any(Object) })]);
     expect(store.metrics.at(-1)).toEqual(expect.objectContaining({ status: "error" }));
     await runtime.stop();
   });

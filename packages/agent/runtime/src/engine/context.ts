@@ -284,7 +284,7 @@ export function cleanCanonicalMessages(messages: readonly RuntimeMessage[]): Run
       if (role === "tool") continue;
       cleaned.push(role === "assistant"
         ? { role, content: [{ type: "text", text: text(raw.content) }] }
-        : { role, content: text(raw.content) });
+        : { ...raw, role, content: text(raw.content) });
       continue;
     }
     const content = raw.content.map((block) => cleanBlock(block, role)).filter((block): block is JsonObject => Boolean(block));
@@ -553,7 +553,7 @@ const prepareSummaryMessages = (
 };
 
 const isConversationUser = (message: RuntimeMessage): boolean =>
-  message.role === "user";
+  message.role === "user" && !message.environmentContext;
 
 const turnSpans = (messages: readonly RuntimeMessage[]): Array<[number, number]> => {
   if (messages.length === 0) return [];
@@ -867,6 +867,7 @@ export class ContextPipeline {
     signal: AbortSignal;
     userIdentity?: RuntimeProviderUserIdentity;
     trigger?: "pre_call" | "overflow" | "post_turn";
+    additionalContextTokens?: number;
   }): Promise<ContextCompactionResult> {
     const trigger = params.trigger ?? "pre_call";
     const sanitized = sanitizeMessagesForProvider(params.messages);
@@ -875,9 +876,10 @@ export class ContextPipeline {
       await this.options.store.replaceMessages(params.sessionId, messages, "repair", { reason: `${trigger}_repair` });
     }
     const beforeTokens = requestContextTokenEstimate(params.systemPrompt, messages, params.toolSchemas);
-    const hardLimit = this.hardLimitTokens;
+    const additionalTokens = Math.max(0, params.additionalContextTokens ?? 0);
+    const hardLimit = this.hardLimitTokens - additionalTokens;
     const triggerLimit = trigger === "pre_call"
-      ? Math.min(hardLimit, Math.max(1, Math.trunc(this.contextWindowTokens * this.preCallThreshold)))
+      ? Math.min(hardLimit, Math.max(1, Math.trunc(this.contextWindowTokens * this.preCallThreshold) - additionalTokens))
       : hardLimit;
     if (trigger !== "overflow" && beforeTokens <= triggerLimit) {
       return {

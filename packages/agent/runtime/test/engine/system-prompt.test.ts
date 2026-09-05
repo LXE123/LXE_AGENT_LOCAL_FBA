@@ -24,17 +24,17 @@ describe("system prompt builder", () => {
     expect(stable).toContain("tested mapping_id");
     expect(volatile).toContain("Available Skills");
     expect(volatile).toContain("Follow the project rules.");
-    expect(volatile).toContain("Provider: anthropic");
-    expect(volatile).toContain("Model: claude-test");
-    expect(volatile).toContain("Platform: feishu");
-    expect(volatile).toContain("Working directory: /workspace/project");
-    expect(volatile).toContain("Git worktree root: /workspace");
+    expect(volatile).not.toContain("Provider: anthropic");
+    expect(volatile).not.toContain("Model: claude-test");
+    expect(volatile).not.toContain("Platform: feishu");
+    expect(volatile).not.toContain("Working directory: /workspace/project");
+    expect(volatile).not.toContain("Git worktree root: /workspace");
     expect(volatile).toContain("There is no filesystem or network sandbox");
     expect(volatile).toContain("workspace is only the default path base");
     expect(volatile).not.toContain(`Server ${"scope"}`);
   });
 
-  test("caches the dataset map with the prefix and keeps the absolute root volatile", () => {
+  test("caches the dataset map without embedding the absolute root", () => {
     const prompt = buildSystemPrompt({
       platform: "feishu",
       provider: "anthropic",
@@ -53,8 +53,8 @@ describe("system prompt builder", () => {
     expect(stable).toContain("fba/delivery_csv — FBA 发货单 CSV。");
     expect(stable).toContain("### replenish");
     expect(stable).not.toContain("/data/var/artifacts");
-    // The root depends on the install, so it belongs with the other runtime facts.
-    expect(volatile).toContain("Artifact root: /data/var/artifacts");
+    // The root is supplied by environment context.
+    expect(volatile).not.toContain("Artifact root: /data/var/artifacts");
     expect(volatile).not.toContain("## Data Directories");
   });
 

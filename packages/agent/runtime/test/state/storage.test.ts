@@ -1,3 +1,4 @@
+import { captureEnvironment, environmentMessage, environmentChanged } from "../../src/engine/environment-context";
 import { messageFixture } from "../message-fixtures";
 import { afterEach, describe, expect, test } from "bun:test";
 import { appendFileSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -15,6 +16,29 @@ afterEach(async () => {
 });
 
 describe("SqliteRuntimeStore", () => {
+  test("replays environment baselines after restart and replacement without changing the title", async () => {
+    const root = mkdtempSync(join(tmpdir(), "lxe-environment-replay-"));
+    roots.push(root);
+    const path = join(root, "agent.sqlite3");
+    const snapshot = captureEnvironment({ workspace: testWorkspace, platform: "desktop", provider: "custom", model: "test" });
+    const message = environmentMessage(snapshot);
+    const store = new SqliteRuntimeStore(path);
+    await store.start();
+    await store.ensureSession({ workspace: testWorkspace, session_id: "s1", source: { platform: "desktop" } });
+    await store.appendMessage("s1", message, "environment_context", "j1");
+    expect(store.listSessions({ limit: 10, offset: 0 }).items[0]?.title).toBe("");
+    await store.appendMessage("s1", { role: "user", content: "Actual question" }, "turn_input", "j1");
+    expect(store.listSessions({ limit: 10, offset: 0 }).items[0]?.title).toBe("Actual question");
+    await store.replaceMessages("s1", [message], "context_replacement");
+    await store.stop();
+    const resumed = new SqliteRuntimeStore(path);
+    await resumed.start();
+    try {
+      expect(await resumed.loadMessages("s1")).toEqual([message]);
+      expect(environmentChanged(await resumed.loadMessages("s1"), snapshot)).toBe(false);
+    } finally { await resumed.stop(); }
+  });
+
   test("upgrades and invalidates the rebuildable display index when turn ownership is missing", async () => {
     const root = mkdtempSync(join(tmpdir(), "lxe-runtime-display-index-"));
     roots.push(root);

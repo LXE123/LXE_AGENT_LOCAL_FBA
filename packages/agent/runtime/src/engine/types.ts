@@ -35,7 +35,21 @@ export type RuntimeContentBlock = TextBlock | ToolCallBlock | ToolResultBlock | 
 
 export type RuntimeMessageContent = string | RuntimeContentBlock[];
 
+export interface RuntimeEnvironmentSnapshot {
+  current_date: string;
+  timezone: string;
+  cwd: string;
+  worktree: string;
+  artifact_root?: string;
+  os: string;
+  bun_version: string;
+  platform: string;
+  provider: string;
+  model: string;
+}
+
 export interface RuntimeConversationMessage {
+  environmentContext?: RuntimeEnvironmentSnapshot;
   role: "user" | "assistant" | "tool" | "system";
   content: RuntimeMessageContent;
 }

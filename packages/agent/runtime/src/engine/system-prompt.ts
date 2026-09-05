@@ -1,4 +1,3 @@
-import { platform, release } from "node:os";
 import type { WorkspaceContext } from "@lxe/protocol";
 import type { LxeSkillDataset } from "../tooling/lxeskill-command";
 
@@ -72,12 +71,9 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
   const volatile = [
     options.skillPrompt.trim(),
     options.workspaceInstructions?.trim() ?? "",
-    `## Runtime\nOS: ${platform()} ${release()}\nBun: ${Bun.version}\nProvider: ${options.provider || "unknown"}\nModel: ${options.model || "unknown"}\nPlatform: ${options.platform || "unknown"}`,
     [
       "## Workspace",
-      `Working directory: ${options.workspace.directory}`,
-      `Git worktree root: ${options.workspace.worktree}`,
-      ...(options.artifactRoot ? [`Artifact root: ${options.artifactRoot}`] : []),
+      "Use the most recent environment_context for the current date, timezone, runtime, channel, model and workspace paths.",
       "Relative paths start from the working directory.",
       "Local file, search, delivery, Shell, Python, and lxeskill operations inherit the LXE Agent process permissions. There is no filesystem or network sandbox; the workspace is only the default path base.",
     ].join("\n"),

@@ -263,6 +263,7 @@ export function createAgentRuntimeHost(
     ...(options.onManagedLlmAuthenticationFailure
       ? { onManagedLlmAuthenticationFailure: options.onManagedLlmAuthenticationFailure }
       : {}),
+    artifactRoot: join(options.dataRoot, "artifacts"),
     systemPrompt: (context) => buildSystemPrompt({
       soul: context.workspaceSnapshot?.soul ?? "",
       workspace: context.workspace,

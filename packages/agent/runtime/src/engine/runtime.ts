@@ -1,3 +1,4 @@
+import { captureEnvironment, environmentChanged, environmentMessage } from "./environment-context";
 import { randomUUID } from "node:crypto";
 import { basename, isAbsolute } from "node:path";
 import type { AgentJob, EmitRequest, JsonObject, WorkspaceContext } from "@lxe/protocol";
@@ -22,6 +23,7 @@ import {
   ContextPipeline,
   DEFAULT_CONTEXT_WINDOW_TOKENS,
   estimateTokens,
+  requestContextTokenEstimate,
   isContextOverflowError,
   trimToolResultBlocks,
   type ContextCompactionResult,
@@ -83,6 +85,7 @@ export interface TypeScriptAgentRuntimeOptions {
     model: string,
     credentialRevision: string,
   ) => Promise<void> | void;
+  artifactRoot?: string;
   systemPrompt: string | ((context: SystemPromptContext) => string);
   maxSteps?: number;
   contextWindowTokens?: number;
@@ -473,24 +476,39 @@ export class TypeScriptAgentRuntime implements AgentRuntime {
         await appendSteering();
         const isLastStep = step === maxSteps - 1;
         const toolSchemas = heartbeat || isLastStep ? [] : toolExposure.schemas();
-        const prepared = await contextPipeline.prepare({
-          sessionId: job.session_id,
-          messages,
-          systemPrompt,
-          toolSchemas,
-          signal: handle.signal,
-          userIdentity,
-          trigger: "pre_call",
-        });
-        accountContext(prepared);
-        observer.context(prepared);
-        messages = prepared.messages;
-        if (prepared.failureReason) {
-          throw new ContextCompactionError(prepared.failureReason, prepared.afterTokens);
-        }
-        if (prepared.hardLimitExceeded) {
-          throw new ContextOverflowError(prepared.afterTokens, contextPipeline.hardLimitTokens);
-        }
+        const prepareRequestContext = async (): Promise<void> => {
+          let snapshot = captureEnvironment({ ...systemPromptContext, ...(this.options.artifactRoot ? { artifactRoot: this.options.artifactRoot } : {}) });
+          let environment = environmentMessage(snapshot);
+          const prepared = await contextPipeline.prepare({
+            sessionId: job.session_id,
+            messages,
+            systemPrompt,
+            toolSchemas,
+            signal: handle.signal,
+            userIdentity,
+            trigger: "pre_call",
+            additionalContextTokens: estimateTokens(environment),
+          });
+          accountContext(prepared);
+          observer.context(prepared);
+          messages = prepared.messages;
+          if (prepared.failureReason) {
+            throw new ContextCompactionError(prepared.failureReason, prepared.afterTokens);
+          }
+          if (prepared.hardLimitExceeded) {
+            throw new ContextOverflowError(prepared.afterTokens, contextPipeline.hardLimitTokens);
+          }
+          // Summarization can span midnight; refresh the clock after it finishes.
+          snapshot = captureEnvironment({ ...systemPromptContext, ...(this.options.artifactRoot ? { artifactRoot: this.options.artifactRoot } : {}) });
+          environment = environmentMessage(snapshot);
+          if (environmentChanged(messages, snapshot)) {
+            const tokens = requestContextTokenEstimate(systemPrompt, [...messages, environment], toolSchemas);
+            if (tokens > contextPipeline.hardLimitTokens) throw new ContextOverflowError(tokens, contextPipeline.hardLimitTokens);
+            await this.appendMessage(job.session_id, environment, "environment_context", job.job_id);
+            messages.push(environment);
+            observer.context({ ...prepared, afterTokens: tokens });
+          }
+        };
         const providerRequest = (
           attemptObserver: ReturnType<RuntimeTurnObserver["providerAttempt"]>,
           wireTrace?: RuntimeWireTraceAttempt,
@@ -513,6 +531,7 @@ export class TypeScriptAgentRuntime implements AgentRuntime {
         const invokeProvider = async (maximumAttempts = DEFAULT_PROVIDER_ATTEMPTS): Promise<AssistantMessage> => {
           let lastError: unknown;
           for (let attempt = 1; attempt <= maximumAttempts; attempt += 1) {
+            await prepareRequestContext();
             providerAttemptOrdinal += 1;
             apiCalls += 1;
             const attemptObserver = observer.providerAttempt(

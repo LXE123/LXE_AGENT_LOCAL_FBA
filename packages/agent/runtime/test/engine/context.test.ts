@@ -84,6 +84,17 @@ const summaryPrompt = (provider: SummaryProvider, index = 0): string => {
 };
 
 describe("token-aware runtime context", () => {
+  test("reserves pending environment tokens before deciding whether compaction is necessary", async () => {
+    const messages = [...closedTurn("old", 1000), { role: "user" as const, content: "next" }];
+    const tokens = requestContextTokenEstimate("", messages);
+    const pipeline = new ContextPipeline({ store: new MemoryStore(), provider: new SummaryProvider(), contextWindowTokens: tokens + 200, reserveTokens: 100, preCallThreshold: 1, recentRawTokens: 50 });
+    const params = { sessionId: "s1", messages, systemPrompt: "", toolSchemas: [], signal: new AbortController().signal };
+    expect((await pipeline.prepare(params)).compacted).toBe(false);
+    const prepared = await pipeline.prepare({ ...params, additionalContextTokens: 150 });
+    expect(prepared.compacted).toBe(true);
+    expect(prepared.afterTokens + 150).toBeLessThanOrEqual(pipeline.hardLimitTokens);
+  });
+
   test("pins pi's history, update, and turn-prefix prompts byte-for-byte", () => {
     const hash = (value: string): string => createHash("sha256").update(value).digest("hex");
     expect(hash(HISTORY_SUMMARY_PROMPT)).toBe("9b00aa68df1a64279bc36e9093367f638701d48ec82e3d08436f65092a515f9b");
