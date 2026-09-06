@@ -72,7 +72,6 @@ export function conversationRows(messages: SessionMessage[], turns: DesktopConve
         add({ ...base, id: `${messageId}:${index}`, kind: "message", presentation: message.role === "assistant" ? (finalMessages.has(message) && block.type === "text" ? "final" : "process") : undefined, status: "completed", message: { ...message, content: [block], attachments: index === blocks.length - 1 ? message.attachments : undefined, artifacts: undefined } });
       });
     }
-    if (message.artifacts?.length) add({ ...base, id: `artifacts:${messageId}`, kind: "artifacts", artifacts: message.artifacts });
   }
   const turnStatus = new Map(messages.flatMap((message) => message.turn?.status && !isInternalMessage(message) ? [[message.turn.turn_id, message] as const] : []));
   for (const [id, message] of turnStatus) {
@@ -108,7 +107,7 @@ export function conversationRows(messages: SessionMessage[], turns: DesktopConve
   const starts = new Map<string, number>();
   for (const row of rows) { const group = row.turnId || row.groupId; starts.set(group, Math.min(starts.get(group) ?? Infinity, row.createdAt || Infinity)); }
   const unique = [...new Map(rows.map((row) => [row.id, row])).values()];
-  return unique.sort((a, b) => {
+  const ordered = unique.sort((a, b) => {
     const time = (starts.get(a.turnId || a.groupId) ?? 0) - (starts.get(b.turnId || b.groupId) ?? 0);
     if (time) return time;
     if (a.turnId && a.turnId === b.turnId) {
@@ -119,6 +118,37 @@ export function conversationRows(messages: SessionMessage[], turns: DesktopConve
     }
     return 0;
   });
+  return appendTurnArtifacts(ordered, messages);
+}
+
+/** Artifact storage location does not decide its presentation position. */
+function appendTurnArtifacts(rows: ConversationRow[], messages: SessionMessage[]): ConversationRow[] {
+  const owners = new Map<string, {turnId: string; groups: Set<string>; files: Map<string, SessionArtifactPayload>} >();
+  for (const message of messages) {
+    if (isInternalMessage(message)) continue;
+    for (const file of message.artifacts ?? []) {
+      const turnId = file.turn_id || message.turn?.turn_id || "";
+      const key = turnId ? `turn:${turnId}` : `group:${message.display_group_id}`;
+      const owner = owners.get(key) ?? {turnId, groups: new Set<string>(), files: new Map<string, SessionArtifactPayload>()};
+      owner.groups.add(message.display_group_id);
+      if (!owner.files.has(file.artifact_id)) owner.files.set(file.artifact_id, file);
+      owners.set(key, owner);
+    }
+  }
+  const after = new Map<number, ConversationRow[]>();
+  for (const [key, owner] of owners) {
+    let last = -1;
+    rows.forEach((row, index) => {
+      if (owner.turnId && row.turnId === owner.turnId || !row.turnId && owner.groups.has(row.groupId)) last = index;
+    });
+    if (last < 0) continue;
+    const tail = rows[last]!;
+    const entries = after.get(last) ?? [];
+    entries.push({id: `artifacts:${key}`, kind: "artifacts", groupId: tail.groupId,
+      turnId: owner.turnId, createdAt: tail.createdAt, artifacts: [...owner.files.values()]});
+    after.set(last, entries);
+  }
+  return rows.flatMap((row, index) => [row, ...(after.get(index) ?? [])]);
 }
 
 export function acknowledgeConversationSend(current: DesktopConversationActivityPayload | undefined, result: DesktopConversationSendPayload, pendingMessage: PendingMessage): DesktopConversationActivityPayload {

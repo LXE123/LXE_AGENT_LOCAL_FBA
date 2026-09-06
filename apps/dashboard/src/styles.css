@@ -9207,6 +9207,7 @@ pre {
 }
 
 .message-with-meta.role-user {
+  margin-inline-start: auto;
   position: relative;
   width: fit-content;
   max-width: min(620px, 78%);
