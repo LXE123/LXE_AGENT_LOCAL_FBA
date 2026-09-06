@@ -11310,10 +11310,19 @@ pre {
   align-items: center;
   gap: 8px;
   width: 100%;
-  padding: 8px 0;
+  padding: 4px 0;
   border: 0;
   background: transparent;
   color: inherit;
   text-align: left;
   cursor: pointer;
+}
+
+.conversation-process-toggle > .live-progress-status {
+  padding: 0;
+}
+
+.process-thinking-paragraphs {
+  display: grid;
+  gap: 6px;
 }

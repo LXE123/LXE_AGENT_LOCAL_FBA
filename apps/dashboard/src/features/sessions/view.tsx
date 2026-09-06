@@ -48,7 +48,7 @@ import {
   toolOperations,
 } from "./conversation";
 import type { ToolOperation } from "./conversation";
-import { formatCompactNumber, formatDate, formatDurationMs, formatMessageTime, formatNumber } from "../../shared/format";
+import { formatCompactNumber, formatDate, formatMessageTime, formatNumber } from "../../shared/format";
 import { useUiText } from "../../shared/i18n";
 import type {
   DesktopConversationActivityPayload,
@@ -77,6 +77,7 @@ import {
 } from "../models/model";
 import { groupSidebarSessions } from "./model";
 import { ConversationWindow } from "./virtual-window";
+import { thinkingParagraphs, formatConversationDuration } from "./typography";
 import { useProcessRows } from "./process";
 import { conversationRows, type ConversationRow, type PendingMessage } from "./presentation";
 import { ConversationWelcome } from "./welcome";
@@ -1400,8 +1401,8 @@ function ConversationStatus({ row }: { row: ConversationRow }) {
     : row.status === "stopping" ? t.conversation.stopping : phaseLabel();
   return <div aria-live={row.status === "error" ? "assertive" : "polite"} className={`live-progress-status state-${row.status}`}>
     {active ? <LoaderCircle className="conversation-spinner" size={13} /> : null}
-    <span className="live-progress-label">{row.kind === "process" && row.status === "completed" ? t.conversation.processCompleted(elapsedMs >= 1_000 ? formatDurationMs(elapsedMs) : "") : label}</span>
-    {elapsedMs >= 1_000 && !(row.kind === "process" && row.status === "completed") ? <span className="live-progress-elapsed">{formatDurationMs(elapsedMs)}</span> : null}
+    <span className="live-progress-label">{row.kind === "process" && row.status === "completed" ? t.conversation.processCompleted(elapsedMs >= 1_000 ? formatConversationDuration(elapsedMs) : "") : label}</span>
+    {elapsedMs >= 1_000 && !(row.kind === "process" && row.status === "completed") ? <span className="live-progress-elapsed">{formatConversationDuration(elapsedMs)}</span> : null}
   </div>;
 }
 
@@ -1435,7 +1436,7 @@ export const UnifiedConversationRow = React.memo(function UnifiedConversationRow
   const thinking = blocks.length === 1 && isRecord(blocks[0]) && ["thinking", "redacted_thinking"].includes(String(blocks[0].type)) ? blocks[0] : undefined;
   if (thinking) return <div className="process-message-content">
     {row.status === "error" ? <div className="process-thinking-text">{stateLabel}</div> : null}
-    <div className="process-thinking-text">{String(thinking.thinking ?? "")}</div>
+    <div className="process-thinking-paragraphs">{thinkingParagraphs(String(thinking.thinking ?? "")).map((paragraph, index) => <div className="process-thinking-text" key={index}>{paragraph}</div>)}</div>
     {thinking.redacted || thinking.type === "redacted_thinking" ? <div className="process-thinking-text redacted">{t.message.redactedThinking}</div> : null}
   </div>;
   if (row.presentation === "process" && message.role === "assistant") return <div className="timeline-text process-message-content">
@@ -1446,7 +1447,7 @@ export const UnifiedConversationRow = React.memo(function UnifiedConversationRow
   if (message.role !== "user" && message.role !== "assistant") return <article className="message-card role-system"><RoleBadge role={message.role} /><MessageContent content={message.content} message={message} /></article>;
   const role = message.role;
   return <div className={`message-with-meta role-${role}`}>
-    <article className={`message-card role-${role}${message.attachments?.length ? " has-attachments" : ""}`}>
+    <article className={`message-card role-${role}${row.presentation === "final" ? " response-final-answer" : ""}${message.attachments?.length ? " has-attachments" : ""}`}>
       <MessageContent content={message.content} message={message} />
       {message.attachments?.length ? <InputAttachmentList attachments={message.attachments} onOpen={onOpenAttachment} /> : null}
       {row.error ? <div role="alert">{row.error}</div> : row.status === "error" ? <div role="status">{stateLabel}</div> : null}

@@ -113,7 +113,7 @@ export function ConversationWindow({ rows, renderRow, hasOlder, hasNewer, loadOl
       <div className="conversation-feed" style={{ position: "relative", height: rows.length ? virtual.getTotalSize() : undefined, minHeight: rows.length ? undefined : "100%" }}>
         {!rows.length ? empty : items.map((item) => <div key={item.key} ref={virtual.measureElement} data-index={item.index}
           data-conversation-row={rows[item.index]!.id} data-display-group={rows[item.index]!.groupId}
-          style={{ position: "absolute", top: 0, left: 0, width: "100%", transform: `translateY(${item.start}px)`, paddingBottom: 12 }}>
+          style={{ position: "absolute", top: 0, left: 0, width: "100%", transform: `translateY(${item.start}px)`, paddingBottom: rows[item.index]!.kind === "process" ? 8 : rows[item.index]!.presentation === "process" ? 6 : 12 }}>
           {renderRow(rows[item.index]!)}
         </div>)}
       </div>
