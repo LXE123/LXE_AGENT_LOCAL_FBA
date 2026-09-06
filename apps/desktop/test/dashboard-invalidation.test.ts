@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { AGENT_PROTOCOL_VERSION, type AgentEvent, type DesktopDashboardInvalidation } from "@lxe/desktop-protocol";
+import { type AgentEvent, type DesktopDashboardInvalidation } from "@lxe/desktop-protocol";
 
 import {
   DashboardInvalidationBatcher,
@@ -10,7 +10,7 @@ import {
 const lifecycleEvent = (
   type: "thread.started" | "turn.started" | "turn.completed" | "turn.failed",
 ): AgentEvent => ({
-  version: AGENT_PROTOCOL_VERSION,
+
   type,
   thread_id: "session-1",
   ...(type === "thread.started" ? {} : { turn_id: "turn-1" }),
@@ -18,7 +18,7 @@ const lifecycleEvent = (
 } as AgentEvent);
 
 const sessionChanged = (changes: Array<"messages" | "usage" | "artifacts"> = ["messages"]): AgentEvent => ({
-  version: AGENT_PROTOCOL_VERSION,
+
   type: "session.changed",
   thread_id: "session-1",
   payload: { changes },
@@ -28,7 +28,7 @@ const itemCompleted = (
   emitKind: "stream" | "final" | "tool" | "progress",
   state: "delta" | "final" | "error" | "" = "",
 ): AgentEvent => ({
-  version: AGENT_PROTOCOL_VERSION,
+
   type: "item.completed",
   thread_id: "session-1",
   turn_id: "turn-1",
@@ -85,7 +85,7 @@ describe("Dashboard invalidation bridge", () => {
     expect(dashboardInvalidationForAgentEvent(lifecycleEvent("thread.started"))).toBeUndefined();
     expect(dashboardInvalidationForAgentEvent(lifecycleEvent("turn.started"))).toBeUndefined();
     expect(dashboardInvalidationForAgentEvent({
-      version: AGENT_PROTOCOL_VERSION,
+
       type: "background_task.changed",
       thread_id: "session-1",
       turn_id: "turn-1",

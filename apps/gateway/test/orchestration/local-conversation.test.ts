@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { AGENT_PROTOCOL_VERSION } from "@lxe/desktop-protocol";
 import type {
   AgentJob,
   DesktopStreamBatchRequest,
@@ -398,7 +397,7 @@ describe("LocalConversationController", () => {
       },
     });
     h.controller.handleAgentEvent({
-      version: AGENT_PROTOCOL_VERSION,
+
       type: "session.changed",
       thread_id: "session-1",
       payload: { changes: ["messages"] },
@@ -519,7 +518,7 @@ describe("LocalConversationController", () => {
       },
     });
     h.controller.handleAgentEvent({
-      version: AGENT_PROTOCOL_VERSION,
+
       type: "background_task.changed",
       thread_id: "session-1",
       turn_id: "turn-1",
@@ -555,7 +554,7 @@ describe("LocalConversationController", () => {
     });
     await h.controller.send({ session_id: "session-1", text: "run it" });
     h.controller.handleAgentEvent({
-      version: AGENT_PROTOCOL_VERSION,
+
       type: "background_task.changed",
       thread_id: "session-1",
       turn_id: "turn-1",
@@ -617,7 +616,7 @@ describe("LocalConversationController", () => {
     // The runtime prefixes pending system events onto the stored user message,
     // so persistence is signalled by the event, never by matching text.
     h.controller.handleAgentEvent({
-      version: AGENT_PROTOCOL_VERSION,
+
       type: "session.changed",
       thread_id: "session-1",
       payload: { changes: ["messages"] },

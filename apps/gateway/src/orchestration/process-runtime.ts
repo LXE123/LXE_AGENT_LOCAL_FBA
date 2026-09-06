@@ -11,15 +11,16 @@ import type {
 } from "@lxe/protocol";
 import {
   AGENT_PROTOCOL_VERSION,
-  isAgentEvent,
-  isAgentResponse,
   parseAgentRunTurnResult,
-  parseAgentWireMessage,
+  parseJsonRpcEnvelope,
+  parseJsonRpcJson,
+  decodeAgentEvent,
   type AgentDashboardRpcCall,
   type AgentDashboardRpcOperation,
   type AgentCommand,
   type AgentCommandPayloads,
   type AgentEvent,
+  type AgentNotification,
   type AgentRequest,
   type AgentResponse,
   type DashboardRpcResult,
@@ -78,6 +79,7 @@ export class AgentProcessError extends Error {
   constructor(
     message: string,
     readonly code = "AgentProcessError",
+    readonly rpcCode?: number,
   ) {
     super(message);
     this.name = "AgentProcessError";
@@ -121,6 +123,9 @@ export class ProcessAgentRuntime implements DirectAgentRuntime {
   private readonly logger: Logger;
   private readonly pending = new Map<string, PendingRequest>();
   private readonly cancelledRuns = new Set<string>();
+  private generation = 0;
+  private notifications = Promise.resolve();
+  private incompatible = false;
   private child: ChildProcessWithoutNullStreams | undefined;
   private stdout: Interface | undefined;
   private stderr: Interface | undefined;
@@ -162,6 +167,7 @@ export class ProcessAgentRuntime implements DirectAgentRuntime {
 
   async start(): Promise<void> {
     this.manuallyStopped = false;
+    this.incompatible = false;
     await this.launch(false);
   }
 
@@ -189,20 +195,24 @@ export class ProcessAgentRuntime implements DirectAgentRuntime {
       },
     );
     this.child = child;
+    const generation = ++this.generation;
+    this.notifications = Promise.resolve();
     this.stdout = createInterface({ input: child.stdout, crlfDelay: Infinity });
     this.stderr = createInterface({ input: child.stderr, crlfDelay: Infinity });
-    this.stdout.on("line", (line) => this.handleLine(line));
+    this.stdout.on("line", (line) => { if (this.child === child) this.handleLine(line, generation); });
     this.stderr.on("line", (line) => {
+      if (this.child !== child) return;
       this.options.onStderr?.(line);
       this.logger.debug("agent_cli_stderr", { line });
     });
-    child.once("error", (error) => this.handleExit(error));
-    child.once("exit", (code, signal) => this.handleExit(new AgentProcessError(
+    child.once("error", (error) => { if (this.child === child) this.handleExit(error); });
+    child.once("exit", (code, signal) => { if (this.child === child) this.handleExit(new AgentProcessError(
       `agent-cli exited: code=${String(code ?? "")} signal=${String(signal ?? "")}`,
       "AgentProcessExited",
-    )));
+    )); });
     try {
       this.remoteHealthSnapshot = objectValue(await this.request("initialize", {
+        protocol_version: AGENT_PROTOCOL_VERSION,
         agent_soul_path: this.options.agentSoulPath,
         skills_root: this.options.skillsRoot,
         user_skills_root: this.options.userSkillsRoot,
@@ -212,13 +222,20 @@ export class ProcessAgentRuntime implements DirectAgentRuntime {
         legacy_workspace: this.options.legacyWorkspace,
         allowed_skill_types: [...this.allowedSkillTypes],
       }, this.options.requestTimeoutMs ?? 30_000));
+      if (this.remoteHealthSnapshot.protocol_version !== AGENT_PROTOCOL_VERSION) {
+        this.incompatible = true;
+        throw new AgentProcessError(`Unsupported agent protocol version: expected ${AGENT_PROTOCOL_VERSION}, received ${String(this.remoteHealthSnapshot.protocol_version)}`, "AgentProtocolVersionMismatch", -32002);
+      }
+      if (this.child !== child) throw new AgentProcessError("agent-cli connection changed during initialization");
       this.setStatus("ready", "agent-cli is ready");
       this.restartAttempt = 0;
     } catch (cause) {
-      await this.terminateChild();
+      if (this.child === child) await this.terminateChild();
       const error = cause instanceof Error ? cause : new Error(String(cause));
-      this.setStatus("error", error.message);
-      if (recovering) this.scheduleRecovery();
+      if (!this.child && this.generation <= generation + 1) {
+        this.setStatus("error", error.message);
+        if (recovering) this.scheduleRecovery();
+      }
       throw error;
     }
   }
@@ -384,10 +401,10 @@ export class ProcessAgentRuntime implements DirectAgentRuntime {
     }
     const id = randomUUID();
     const request: AgentRequest<C> = {
-      version: AGENT_PROTOCOL_VERSION,
+      jsonrpc: "2.0",
       id,
-      command,
-      payload,
+      method: command,
+      params: payload,
     } as AgentRequest<C>;
     return new Promise<JsonValue>((resolveRequest, rejectRequest) => {
       const pending: PendingRequest = { resolve: resolveRequest, reject: rejectRequest };
@@ -411,33 +428,55 @@ export class ProcessAgentRuntime implements DirectAgentRuntime {
     });
   }
 
-  private handleLine(line: string): void {
-    let message: ReturnType<typeof parseAgentWireMessage>;
+  private handleLine(line: string, generation: number): void {
     try {
-      message = parseAgentWireMessage(line);
+      const value = parseJsonRpcJson(line);
+      if (Array.isArray(value) && !value.length) throw new Error("Empty JSON-RPC output batch");
+      for (const item of Array.isArray(value) ? value : [value]) {
+        const message = parseJsonRpcEnvelope(item);
+        if (!("method" in message)) this.handleResponse(message);
+        else if (!("id" in message)) {
+          const event = decodeAgentEvent(message as AgentNotification);
+          this.notifications = this.notifications.then(async () => {
+            if (generation === this.generation) await this.handleEvent(event, generation);
+          }).catch((error) => this.logger.error("agent_event_delivery_failed", { type: event.type, error }));
+        } else throw new Error("Unexpected agent-cli request");
+      }
     } catch (cause) {
       const error = cause instanceof Error ? cause : new Error(String(cause));
-      this.logger.error("invalid_agent_cli_output", { error, line });
-      this.setStatus("error", error.message);
-      return;
+      this.logger.error("invalid_agent_cli_output", { error });
+      void this.failConnection(error);
     }
-    if (isAgentResponse(message)) {
-      this.handleResponse(message);
-      return;
-    }
-    if (isAgentEvent(message)) void this.handleEvent(message);
+  }
+
+  private async failConnection(error: Error): Promise<void> {
+    this.setStatus("error", error.message);
+    this.rejectPending(error);
+    const termination = this.terminateChild();
+    const generation = this.generation;
+    await termination;
+    if (generation === this.generation && !this.child && !this.stopping && !this.manuallyStopped) this.scheduleRecovery();
   }
 
   private handleResponse(response: AgentResponse): void {
-    const pending = this.pending.get(response.id);
-    if (!pending) return;
-    this.pending.delete(response.id);
+    if (response.id === null) throw new Error("error" in response ? response.error.message : "Uncorrelated JSON-RPC response with null id");
+    const pending = typeof response.id === "string" ? this.pending.get(response.id) : undefined;
+    if (!pending) {
+      this.logger.debug("unmatched_agent_response", { id: response.id });
+      return;
+    }
+    this.pending.delete(response.id as string);
     if (pending.timer) clearTimeout(pending.timer);
-    if (response.ok) pending.resolve(response.result);
-    else pending.reject(new AgentProcessError(response.error.message, response.error.code));
+    if ("result" in response) pending.resolve(response.result);
+    else {
+      if (response.error.code === -32002) this.incompatible = true;
+      const data = objectValue(response.error.data ?? null);
+      pending.reject(new AgentProcessError(response.error.message,
+        typeof data.code === "string" ? data.code : "AgentProtocolError", response.error.code));
+    }
   }
 
-  private async handleEvent(event: AgentEvent): Promise<void> {
+  private async handleEvent(event: AgentEvent, generation: number): Promise<void> {
     try {
       if (event.type === "item.completed") await this.options.onEmit?.(event.payload);
       else if (event.type === "conversation.stream.delta") await this.options.onDesktopStream?.(event.payload);
@@ -450,7 +489,7 @@ export class ProcessAgentRuntime implements DirectAgentRuntime {
           this.options.onStatus?.(this.status());
         }
       }
-      await this.options.onEvent?.(event);
+      if (generation === this.generation) await this.options.onEvent?.(event);
     } catch (cause) {
       this.logger.error("agent_event_delivery_failed", { type: event.type, error: cause });
     }
@@ -459,6 +498,8 @@ export class ProcessAgentRuntime implements DirectAgentRuntime {
   private handleExit(error: Error): void {
     if (!this.child) return;
     this.child = undefined;
+    this.generation += 1;
+    this.notifications = Promise.resolve();
     this.stdout?.close();
     this.stderr?.close();
     this.stdout = undefined;
@@ -470,14 +511,14 @@ export class ProcessAgentRuntime implements DirectAgentRuntime {
   }
 
   private scheduleRecovery(): void {
-    if (this.manuallyStopped || this.restartTimer) return;
+    if (this.manuallyStopped || this.incompatible || this.restartTimer) return;
     const delays = this.options.restartDelaysMs ?? [];
     const delay = delays[this.restartAttempt];
     if (delay === undefined) return;
     this.restartAttempt += 1;
     this.restartTimer = setTimeout(() => {
       this.restartTimer = undefined;
-      if (this.manuallyStopped) return;
+      if (this.manuallyStopped || this.incompatible) return;
       void this.launch(true).catch(() => undefined);
     }, delay);
     this.restartTimer.unref?.();
@@ -487,10 +528,13 @@ export class ProcessAgentRuntime implements DirectAgentRuntime {
     const child = this.child;
     if (!child) return;
     this.child = undefined;
+    this.generation += 1;
+    this.notifications = Promise.resolve();
     this.stdout?.close();
     this.stderr?.close();
     this.stdout = undefined;
     this.stderr = undefined;
+    this.rejectPending(new AgentProcessError("agent-cli stopped", "AgentProcessStopped"));
     if (!child.killed) child.kill("SIGTERM");
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -507,7 +551,6 @@ export class ProcessAgentRuntime implements DirectAgentRuntime {
     } finally {
       if (timer) clearTimeout(timer);
     }
-    this.rejectPending(new AgentProcessError("agent-cli stopped", "AgentProcessStopped"));
   }
 
   private rejectPending(error: Error): void {

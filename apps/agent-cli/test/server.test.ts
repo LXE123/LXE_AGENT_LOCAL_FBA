@@ -7,10 +7,18 @@ import type { DesktopStreamBatchRequest } from "@lxe/protocol";
 import {
   AGENT_PROTOCOL_VERSION,
   DashboardRpcError,
+  decodeAgentEvent,
+  type AgentServerOutput,
   type AgentEvent,
   type AgentResponse,
 } from "@lxe/desktop-protocol";
 import { AgentProtocolServer, type AgentProtocolServerOptions } from "../src/server";
+
+const collect = (output: Array<AgentResponse | AgentEvent>, message: AgentServerOutput): void => {
+  for (const item of Array.isArray(message) ? message : [message]) {
+    output.push("method" in item ? decodeAgentEvent(item) : item);
+  }
+};
 
 type CreateHost = NonNullable<AgentProtocolServerOptions["createHost"]>;
 
@@ -20,6 +28,7 @@ const workspace = (root: string) => ({
 });
 
 const initializePayload = (root: string) => ({
+  protocol_version: AGENT_PROTOCOL_VERSION,
   agent_soul_path: join(root, "SOUL.md"),
   skills_root: join(root, "skills"),
   user_skills_root: join(root, "user-skills"),
@@ -72,15 +81,15 @@ describe("AgentProtocolServer", () => {
     }) as unknown as CreateHost;
     const root = process.cwd();
     const server = new AgentProtocolServer({
-      write: (message) => { output.push(message); },
+      write: (message) => { collect(output, message); },
       createHost,
       environment: { LOCAL_LOGS_ENABLED: "0" },
     });
     await server.accept(JSON.stringify({
-      version: AGENT_PROTOCOL_VERSION,
+      jsonrpc: "2.0",
       id: "initialize-background-event",
-      command: "initialize",
-      payload: initializePayload(root),
+      method: "initialize",
+      params: initializePayload(root),
     }));
     await notify?.({
       exec_id: "exec_1234abcd",
@@ -121,15 +130,15 @@ describe("AgentProtocolServer", () => {
     }) as unknown as CreateHost;
     const root = process.cwd();
     const server = new AgentProtocolServer({
-      write: (message) => { output.push(message); },
+      write: (message) => { collect(output, message); },
       createHost,
       environment: { LOCAL_LOGS_ENABLED: "0" },
     });
     await server.accept(JSON.stringify({
-      version: AGENT_PROTOCOL_VERSION,
+      jsonrpc: "2.0",
       id: "initialize-desktop-stream",
-      command: "initialize",
-      payload: initializePayload(root),
+      method: "initialize",
+      params: initializePayload(root),
     }));
     const batch: DesktopStreamBatchRequest = {
       session_id: "session-1",
@@ -147,7 +156,6 @@ describe("AgentProtocolServer", () => {
     await emitDesktop?.(batch);
 
     expect(output).toContainEqual({
-      version: AGENT_PROTOCOL_VERSION,
       type: "conversation.stream.delta",
       thread_id: "session-1",
       turn_id: "turn-1",
@@ -170,15 +178,15 @@ describe("AgentProtocolServer", () => {
     }) as unknown as CreateHost;
     const root = process.cwd();
     const server = new AgentProtocolServer({
-      write: (message) => { output.push(message); },
+      write: (message) => { collect(output, message); },
       createHost,
       environment: { LOCAL_LOGS_ENABLED: "0" },
     });
     await server.accept(JSON.stringify({
-      version: AGENT_PROTOCOL_VERSION,
+      jsonrpc: "2.0",
       id: "initialize-session-change",
-      command: "initialize",
-      payload: initializePayload(root),
+      method: "initialize",
+      params: initializePayload(root),
     }));
     await notify?.("session-1", "messages");
     await notify?.("session-1", "usage");
@@ -189,25 +197,21 @@ describe("AgentProtocolServer", () => {
       "type" in message && message.type === "session.changed");
     expect(changes).toEqual([
       {
-        version: AGENT_PROTOCOL_VERSION,
         type: "session.changed",
         thread_id: "session-1",
         payload: { changes: ["messages"] },
       },
       {
-        version: AGENT_PROTOCOL_VERSION,
         type: "session.changed",
         thread_id: "session-1",
         payload: { changes: ["usage"] },
       },
       {
-        version: AGENT_PROTOCOL_VERSION,
         type: "session.changed",
         thread_id: "session-1",
         payload: { changes: ["artifacts"] },
       },
       {
-        version: AGENT_PROTOCOL_VERSION,
         type: "session.changed",
         thread_id: "session-1",
         payload: { changes: ["attachments"] },
@@ -234,15 +238,15 @@ describe("AgentProtocolServer", () => {
     })) as unknown as CreateHost;
     const root = process.cwd();
     const server = new AgentProtocolServer({
-      write: (message) => { output.push(message); },
+      write: (message) => { collect(output, message); },
       createHost,
       environment: { LOCAL_LOGS_ENABLED: "0" },
     });
     await server.accept(JSON.stringify({
-      version: AGENT_PROTOCOL_VERSION,
+      jsonrpc: "2.0",
       id: "initialize-artifact",
-      command: "initialize",
-      payload: initializePayload(root),
+      method: "initialize",
+      params: initializePayload(root),
     }));
     for (const [id, sessionId, artifactId] of [
       ["artifact-found", "session-1", "artifact-1"],
@@ -250,27 +254,27 @@ describe("AgentProtocolServer", () => {
       ["artifact-unknown", "session-1", "artifact-2"],
     ]) {
       await server.accept(JSON.stringify({
-        version: AGENT_PROTOCOL_VERSION,
+        jsonrpc: "2.0",
         id,
-        command: "resolve_artifact",
-        payload: { session_id: sessionId, artifact_id: artifactId },
+        method: "resolve_artifact",
+        params: { session_id: sessionId, artifact_id: artifactId },
       }));
     }
 
     expect(output.find((message) => !("type" in message) && message.id === "artifact-found"))
-      .toMatchObject({ ok: true, result: { found: true, path: "/private/artifacts/report.xlsx" } });
+      .toMatchObject({ result: { found: true, path: "/private/artifacts/report.xlsx" } });
     expect(output.find((message) => !("type" in message) && message.id === "artifact-cross-session"))
-      .toMatchObject({ ok: true, result: { found: false } });
+      .toMatchObject({ result: { found: false } });
     expect(output.find((message) => !("type" in message) && message.id === "artifact-unknown"))
-      .toMatchObject({ ok: true, result: { found: false } });
+      .toMatchObject({ result: { found: false } });
     await server.accept(JSON.stringify({
-      version: AGENT_PROTOCOL_VERSION,
+      jsonrpc: "2.0",
       id: "attachment-found",
-      command: "resolve_attachment",
-      payload: { session_id: "session-1", attachment_id: "attachment-1" },
+      method: "resolve_attachment",
+      params: { session_id: "session-1", attachment_id: "attachment-1" },
     }));
     expect(output.find((message) => !("type" in message) && message.id === "attachment-found"))
-      .toMatchObject({ ok: true, result: { found: true, path: "/private/input/orders.csv" } });
+      .toMatchObject({ result: { found: true, path: "/private/input/orders.csv" } });
     await server.shutdown();
   });
 
@@ -295,28 +299,28 @@ describe("AgentProtocolServer", () => {
     })) as unknown as CreateHost;
     const root = process.cwd();
     const server = new AgentProtocolServer({
-      write: (message) => { output.push(message); },
+      write: (message) => { collect(output, message); },
       createHost,
       environment: { LOCAL_LOGS_ENABLED: "0" },
     });
     await server.accept(JSON.stringify({
-      version: AGENT_PROTOCOL_VERSION,
+      jsonrpc: "2.0",
       id: "initialize-permission",
-      command: "initialize",
-      payload: initializePayload(root),
+      method: "initialize",
+      params: initializePayload(root),
     }));
     await server.accept(JSON.stringify({
-      version: AGENT_PROTOCOL_VERSION,
+      jsonrpc: "2.0",
       id: "permission-update",
-      command: "update_skill_permissions",
-      payload: { allowed_skill_types: ["shopee_operations", "default"] },
+      method: "update_skill_permissions",
+      params: { allowed_skill_types: ["shopee_operations", "default"] },
     }));
     const revision = "a".repeat(64);
     await server.accept(JSON.stringify({
-      version: AGENT_PROTOCOL_VERSION,
+      jsonrpc: "2.0",
       id: "managed-credential-update",
-      command: "update_managed_llm_credential",
-      payload: {
+      method: "update_managed_llm_credential",
+      params: {
         target: { provider: "kimi_coding", model: "kimi-for-coding" },
         credential: {
           provider: "kimi_coding",
@@ -331,11 +335,11 @@ describe("AgentProtocolServer", () => {
 
     expect(updates).toEqual([["shopee_operations", "default"]]);
     expect(output.find((message) => !("type" in message) && message.id === "permission-update"))
-      .toMatchObject({ ok: true, result: { updated: true } });
+      .toMatchObject({ result: { updated: true } });
     expect(credentialRevisions).toEqual([revision]);
     expect(managedTargets).toEqual([{ provider: "kimi_coding", model: "kimi-for-coding" }]);
     expect(output.find((message) => !("type" in message) && message.id === "managed-credential-update"))
-      .toMatchObject({ ok: true, result: { updated: true } });
+      .toMatchObject({ result: { updated: true } });
     expect(JSON.stringify(output)).not.toContain("managed-secret");
     await server.shutdown();
   });
@@ -363,65 +367,65 @@ describe("AgentProtocolServer", () => {
     })) as unknown as CreateHost;
     const root = process.cwd();
     const server = new AgentProtocolServer({
-      write: (message) => { output.push(message); },
+      write: (message) => { collect(output, message); },
       createHost,
       environment: { LOCAL_LOGS_ENABLED: "0" },
     });
     await server.accept(JSON.stringify({
-      version: AGENT_PROTOCOL_VERSION,
+      jsonrpc: "2.0",
       id: "initialize-revocation",
-      command: "initialize",
-      payload: initializePayload(root),
+      method: "initialize",
+      params: initializePayload(root),
     }));
     const run = server.accept(JSON.stringify({
-      version: AGENT_PROTOCOL_VERSION,
+      jsonrpc: "2.0",
       id: "run-before-revocation",
-      command: "run_turn",
-      payload: { job: turnJob(root) },
+      method: "run_turn",
+      params: { job: turnJob(root) },
     }));
     await turnStarted;
     await server.accept(JSON.stringify({
-      version: AGENT_PROTOCOL_VERSION,
+      jsonrpc: "2.0",
       id: "revoke-managed-credential",
-      command: "update_managed_llm_credential",
-      payload: { credential: null },
+      method: "update_managed_llm_credential",
+      params: { credential: null },
     }));
     await run;
 
     expect(output.find((message) => !("type" in message) && message.id === "revoke-managed-credential"))
-      .toMatchObject({ ok: true, result: { updated: true, cancelled_active_turns: true } });
+      .toMatchObject({ result: { updated: true, cancelled_active_turns: true } });
     expect(output.find((message) => !("type" in message) && message.id === "run-before-revocation"))
-      .toMatchObject({ ok: true, result: { status: "cancelled" } });
+      .toMatchObject({ result: { status: "cancelled" } });
     await server.shutdown();
   });
 
   test("rejects commands before initialize", async () => {
     const output: Array<AgentResponse | AgentEvent> = [];
-    const server = new AgentProtocolServer({ write: (message) => { output.push(message); } });
+    const server = new AgentProtocolServer({ write: (message) => { collect(output, message); } });
     await server.accept(JSON.stringify({
-      version: AGENT_PROTOCOL_VERSION,
+      jsonrpc: "2.0",
       id: "health-1",
-      command: "ensure_session",
-      payload: { request: { session_id: "session-1", source: {}, workspace: workspace(process.cwd()) } },
+      method: "ensure_session",
+      params: { request: { session_id: "session-1", source: {}, workspace: workspace(process.cwd()) } },
     }));
     expect(output).toHaveLength(1);
-    expect(output[0]).toMatchObject({ id: "health-1", ok: false });
+    expect(output[0]).toMatchObject({ id: "health-1", error: { code: -32001 } });
   });
 
   test("rejects the removed pop_pending_events command", async () => {
     const output: Array<AgentResponse | AgentEvent> = [];
-    const server = new AgentProtocolServer({ write: (message) => { output.push(message); } });
+    const server = new AgentProtocolServer({ write: (message) => { collect(output, message); } });
     await server.accept(JSON.stringify({
-      version: AGENT_PROTOCOL_VERSION,
+      jsonrpc: "2.0",
       id: "pop-1",
-      command: "pop_pending_events",
-      payload: { session_id: "session-1" },
+      method: "pop_pending_events",
+      params: { session_id: "session-1" },
     }));
     expect(output).toHaveLength(1);
     const response = output[0];
-    expect(response && !("type" in response) && !response.ok).toBe(true);
-    expect(response && !("type" in response) && !response.ok ? response.error.message : "")
-      .toContain("unsupported agent protocol command");
+    expect(response && !("type" in response) && "error" in response).toBe(true);
+    expect(response && !("type" in response) && "error" in response ? response.error.message : "")
+      .toContain("Unknown method:");
   });
 
   test("run_turn returns steering the runtime never consumed", async () => {
@@ -440,27 +444,27 @@ describe("AgentProtocolServer", () => {
       },
     })) as unknown as CreateHost;
     const server = new AgentProtocolServer({
-      write: (message) => { output.push(message); },
+      write: (message) => { collect(output, message); },
       createHost,
       environment: { LOCAL_LOGS_ENABLED: "0" },
     });
     await server.accept(JSON.stringify({
-      version: AGENT_PROTOCOL_VERSION,
+      jsonrpc: "2.0",
       id: "initialize-1",
-      command: "initialize",
-      payload: initializePayload(root),
+      method: "initialize",
+      params: initializePayload(root),
     }));
     await server.accept(JSON.stringify({
-      version: AGENT_PROTOCOL_VERSION,
+      jsonrpc: "2.0",
       id: "turn-1",
-      command: "run_turn",
-      payload: { job: turnJob(root) },
+      method: "run_turn",
+      params: { job: turnJob(root) },
     }));
 
     const response = output.find((message): message is AgentResponse =>
       !("type" in message) && message.id === "turn-1");
     expect(response).toMatchObject({
-      ok: true,
+
       result: {
         status: "completed",
         reply: "ok",
@@ -491,68 +495,69 @@ describe("AgentProtocolServer", () => {
       }),
     })) as unknown as CreateHost;
     const server = new AgentProtocolServer({
-      write: (message) => { output.push(message); },
+      write: (message) => { collect(output, message); },
       createHost,
       environment: { LOCAL_LOGS_ENABLED: "0" },
     });
     await server.accept(JSON.stringify({
-      version: AGENT_PROTOCOL_VERSION,
+      jsonrpc: "2.0",
       id: "initialize-empty-steering",
-      command: "initialize",
-      payload: initializePayload(root),
+      method: "initialize",
+      params: initializePayload(root),
     }));
     await server.accept(JSON.stringify({
-      version: AGENT_PROTOCOL_VERSION,
+      jsonrpc: "2.0",
       id: "turn-empty-steering",
-      command: "run_turn",
-      payload: { job: turnJob(root) },
+      method: "run_turn",
+      params: { job: turnJob(root) },
     }));
 
     expect(output.find((message) => !("type" in message) && message.id === "turn-empty-steering"))
-      .toMatchObject({ ok: true, result: { remaining_steering: [] } });
+      .toMatchObject({ result: { remaining_steering: [] } });
     await server.shutdown();
   });
 
   test("rejects the removed health command", async () => {
     const output: Array<AgentResponse | AgentEvent> = [];
-    const server = new AgentProtocolServer({ write: (message) => { output.push(message); } });
+    const server = new AgentProtocolServer({ write: (message) => { collect(output, message); } });
     await server.accept(JSON.stringify({
-      version: AGENT_PROTOCOL_VERSION,
+      jsonrpc: "2.0",
       id: "health-1",
-      command: "health",
-      payload: {},
+      method: "health",
+      params: {},
     }));
     expect(output).toHaveLength(1);
     const response = output[0];
-    expect(response && !("type" in response) && !response.ok).toBe(true);
-    expect(response && !("type" in response) && !response.ok ? response.error.message : "")
-      .toContain("unsupported agent protocol command");
+    expect(response && !("type" in response) && "error" in response).toBe(true);
+    expect(response && !("type" in response) && "error" in response ? response.error.message : "")
+      .toContain("Unknown method:");
   });
 
   test("propagates Dashboard RPC errors through the agent error envelope", async () => {
     const output: Array<AgentResponse | AgentEvent> = [];
     const root = process.cwd();
     const server = new AgentProtocolServer({
-      write: (message) => { output.push(message); },
+      write: (message) => { collect(output, message); },
       createHost: fakeHost,
       environment: { LOCAL_LOGS_ENABLED: "0" },
     });
     await server.accept(JSON.stringify({
-      version: AGENT_PROTOCOL_VERSION,
+      jsonrpc: "2.0",
       id: "initialize-dashboard",
-      command: "initialize",
-      payload: initializePayload(root),
+      method: "initialize",
+      params: initializePayload(root),
     }));
     await server.accept(JSON.stringify({
-      version: AGENT_PROTOCOL_VERSION,
+      jsonrpc: "2.0",
       id: "dashboard-1",
-      command: "dashboard_call",
-      payload: { operation: "models.list", input: {} },
+      method: "dashboard_call",
+      params: { operation: "models.list", input: {} },
     }));
     expect(output.find((message) => !("type" in message) && message.id === "dashboard-1"))
       .toMatchObject({
-        ok: false,
-        error: { code: "not_found", message: "dashboard item not found" },
+
+        error: { code: -32000,
+        data: { code: "not_found" }, message: "dashboard item not found" },
       });
     await server.shutdown();
   });
@@ -566,29 +571,29 @@ describe("AgentProtocolServer", () => {
     })) as unknown as CreateHost;
     const root = process.cwd();
     const server = new AgentProtocolServer({
-      write: (message) => { output.push(message); },
+      write: (message) => { collect(output, message); },
       createHost,
       environment: { LOCAL_LOGS_ENABLED: "0" },
     });
 
     await server.accept(JSON.stringify({
-      version: AGENT_PROTOCOL_VERSION,
+      jsonrpc: "2.0",
       id: "initialize-failed",
-      command: "initialize",
-      payload: initializePayload(root),
+      method: "initialize",
+      params: initializePayload(root),
     }));
     await server.accept(JSON.stringify({
-      version: AGENT_PROTOCOL_VERSION,
+      jsonrpc: "2.0",
       id: "command-after-failure",
-      command: "ensure_session",
-      payload: { request: { session_id: "session-1", source: {}, workspace: workspace(root) } },
+      method: "ensure_session",
+      params: { request: { session_id: "session-1", source: {}, workspace: workspace(root) } },
     }));
 
     expect(stops).toBe(1);
     expect(output.find((message) => !("type" in message) && message.id === "initialize-failed"))
-      .toMatchObject({ ok: false, error: { message: "runtime start failed" } });
+      .toMatchObject({ error: { message: "runtime start failed" } });
     expect(output.find((message) => !("type" in message) && message.id === "command-after-failure"))
-      .toMatchObject({ ok: false, error: { message: "agent-cli is not initialized" } });
+      .toMatchObject({ error: { message: "agent-cli is not initialized" } });
     await server.shutdown();
   });
 
@@ -596,15 +601,17 @@ describe("AgentProtocolServer", () => {
     const order: string[] = [];
     const server = new AgentProtocolServer({
       write: (message) => {
-        order.push("type" in message ? message.type : `response:${message.id}`);
+        for (const item of Array.isArray(message) ? message : [message]) {
+          order.push("method" in item ? item.method : `response:${item.id}`);
+        }
       },
       exit: () => { order.push("exit"); },
     });
     await server.accept(JSON.stringify({
-      version: AGENT_PROTOCOL_VERSION,
+      jsonrpc: "2.0",
       id: "shutdown-1",
-      command: "shutdown",
-      payload: {},
+      method: "shutdown",
+      params: {},
     }));
     expect(order).toEqual(["system.status", "response:shutdown-1", "exit"]);
   });
@@ -618,21 +625,20 @@ describe("AgentProtocolServer", () => {
         LOG_LEVEL: "ERROR",
         RUNTIME_LOG_LEVEL: "INFO",
       },
-      write: (message) => { output.push(message); },
+      write: (message) => { collect(output, message); },
       createHost: fakeHost,
     });
     try {
       await server.accept(JSON.stringify({
-        version: AGENT_PROTOCOL_VERSION,
+        jsonrpc: "2.0",
         id: "initialize-1",
-        command: "initialize",
-        payload: initializePayload(root),
+        method: "initialize",
+        params: initializePayload(root),
       }));
 
       const response = output.find((message): message is AgentResponse =>
         !("type" in message) && message.id === "initialize-1");
       expect(response).toMatchObject({
-        ok: true,
         result: {
           logging: {
             local_file_enabled: true,
@@ -645,7 +651,7 @@ describe("AgentProtocolServer", () => {
       const ready = output.find((message): message is AgentEvent =>
         "type" in message && message.type === "system.ready");
       expect(ready).toMatchObject({ payload: { logging: { local_file_enabled: true } } });
-      const filePath = String(response?.ok
+      const filePath = String(response && "result" in response
         && response.result !== null
         && typeof response.result === "object"
         && !Array.isArray(response.result)

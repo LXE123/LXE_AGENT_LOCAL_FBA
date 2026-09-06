@@ -1,6 +1,6 @@
 import { createInterface } from "node:readline";
 import { createLogger } from "@lxe/core";
-import type { AgentEvent, AgentResponse } from "@lxe/desktop-protocol";
+import type { AgentServerOutput } from "@lxe/desktop-protocol";
 import { AgentProtocolServer } from "./server";
 import { runExecCommand } from "./exec-command";
 
@@ -46,7 +46,7 @@ function startServer(): void {
   }
 
   let writes = Promise.resolve();
-  const write = (message: AgentResponse | AgentEvent): Promise<void> => {
+  const write = (message: AgentServerOutput): Promise<void> => {
     const line = `${JSON.stringify(message)}\n`;
     writes = writes.then(() => new Promise<void>((resolveWrite, rejectWrite) => {
       process.stdout.write(line, (error) => error ? rejectWrite(error) : resolveWrite());

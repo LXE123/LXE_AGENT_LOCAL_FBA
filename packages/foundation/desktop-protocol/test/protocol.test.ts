@@ -4,52 +4,43 @@ import {
   AGENT_PROTOCOL_VERSION,
   AgentProtocolError,
   isAgentResponse,
+  decodeAgentEvent,
+  encodeAgentEvent,
+  type AgentEvent,
+  type AgentNotification,
   parseAgentRunTurnResult,
   parseAgentWireMessage,
   parseDashboardRpcCall,
   type ExecTaskSnapshotPayload,
 } from "../src";
 
+const roundTripEvent = (event: unknown): AgentEvent => decodeAgentEvent(
+  parseAgentWireMessage(JSON.stringify(encodeAgentEvent(event as AgentEvent))) as AgentNotification,
+);
+
 describe("desktop agent protocol", () => {
   test("parses a valid response envelope", () => {
     const message = parseAgentWireMessage(JSON.stringify({
-      version: AGENT_PROTOCOL_VERSION,
+      jsonrpc: "2.0",
       id: "request-1",
-      ok: true,
       result: { ready: true },
     }));
     expect(isAgentResponse(message)).toBe(true);
   });
 
-  test("rejects unsupported versions", () => {
-    expect(() => parseAgentWireMessage(JSON.stringify({
-      version: 16,
-      id: "request-v16",
-      ok: true,
-      result: null,
-    }))).toThrow("unsupported agent protocol version: 16");
-    expect(() => parseAgentWireMessage(JSON.stringify({
-      version: AGENT_PROTOCOL_VERSION + 1,
-      id: "request-1",
-      ok: true,
-      result: null,
-    }))).toThrow("unsupported agent protocol version");
-    expect(() => parseAgentWireMessage(JSON.stringify({
-      version: 4,
-      id: "request-v4",
-      ok: true,
-      result: null,
-    }))).toThrow("unsupported agent protocol version: 4");
+  test("rejects old wire envelopes and unsupported JSON-RPC versions", () => {
+    for (const message of [
+      { version: 17, id: "old", ok: true, result: null },
+      { jsonrpc: "1.0", id: "wrong-version", result: null },
+    ]) expect(() => parseAgentWireMessage(JSON.stringify(message))).toThrow("jsonrpc must equal 2.0");
   });
 
   test("strictly parses session change events", () => {
-    expect(parseAgentWireMessage(JSON.stringify({
-      version: AGENT_PROTOCOL_VERSION,
+    expect(roundTripEvent({
       type: "session.changed",
       thread_id: "session-1",
       payload: { changes: ["messages", "usage", "artifacts", "messages"] },
-    }))).toEqual({
-      version: AGENT_PROTOCOL_VERSION,
+    })).toEqual({
       type: "session.changed",
       thread_id: "session-1",
       payload: { changes: ["messages", "usage", "artifacts"] },
@@ -60,12 +51,11 @@ describe("desktop agent protocol", () => {
       { changes: ["metadata"] },
       { changes: ["messages"], message: { role: "user", content: "must not cross the boundary" } },
     ]) {
-      expect(() => parseAgentWireMessage(JSON.stringify({
-        version: AGENT_PROTOCOL_VERSION,
-        type: "session.changed",
+      expect(() => roundTripEvent({
+          type: "session.changed",
         thread_id: "session-1",
         payload,
-      }))).toThrow("session.changed");
+      })).toThrow("session.changed");
     }
   });
 
@@ -86,28 +76,27 @@ describe("desktop agent protocol", () => {
       output_tail: "ok",
     } satisfies ExecTaskSnapshotPayload;
     const event = {
-      version: AGENT_PROTOCOL_VERSION,
       type: "background_task.changed",
       thread_id: "session-1",
       turn_id: "turn-1",
       payload: { tool_call_id: "tool-1", task },
     } as const;
-    expect(parseAgentWireMessage(JSON.stringify(event))).toEqual(event);
-    expect(() => parseAgentWireMessage(JSON.stringify({ ...event, thread_id: "session-2" })))
+    expect(roundTripEvent(event)).toEqual(event);
+    expect(() => roundTripEvent({ ...event, thread_id: "session-2" }))
       .toThrow("payload is invalid");
-    expect(() => parseAgentWireMessage(JSON.stringify({
+    expect(() => roundTripEvent({
       ...event,
       payload: { ...event.payload, task: { ...task, status: "running" } },
-    }))).toThrow("payload is invalid");
-    expect(() => parseAgentWireMessage(JSON.stringify({
+    })).toThrow("payload is invalid");
+    expect(() => roundTripEvent({
       ...event,
       payload: { ...event.payload, task: { ...task, task_id: task.exec_id } },
-    }))).toThrow("payload is invalid");
+    })).toThrow("payload is invalid");
     const { output_tail: _outputTail, ...incompleteTask } = task;
-    expect(() => parseAgentWireMessage(JSON.stringify({
+    expect(() => roundTripEvent({
       ...event,
       payload: { ...event.payload, task: incompleteTask },
-    }))).toThrow("payload is invalid");
+    })).toThrow("payload is invalid");
   });
 
   test.each([undefined, "estimated", "usage_calibrated"] as const)("strictly parses desktop stream batches with context source %s and matching envelopes", (context_source) => {
@@ -136,27 +125,26 @@ describe("desktop agent protocol", () => {
       }],
     };
     const event = {
-      version: AGENT_PROTOCOL_VERSION,
       type: "conversation.stream.delta",
       thread_id: "session-1",
       turn_id: "turn-1",
       payload,
     } as const;
-    expect(parseAgentWireMessage(JSON.stringify(event))).toEqual(event);
-    expect(() => parseAgentWireMessage(JSON.stringify({ ...event, turn_id: "turn-other" })))
+    expect(roundTripEvent(event)).toEqual(event);
+    expect(() => roundTripEvent({ ...event, turn_id: "turn-other" }))
       .toThrow("envelope does not match");
-    expect(() => parseAgentWireMessage(JSON.stringify({ ...event, payload: { ...payload, seq: 0 } })))
+    expect(() => roundTripEvent({ ...event, payload: { ...payload, seq: 0 } }))
       .toThrow("payload is invalid");
     const mutation = payload.mutations[0]!;
     if (mutation.kind !== "stream_updated") throw new Error("Expected stream_updated fixture");
     for (const invalidSource of ["unknown", null]) {
-      expect(() => parseAgentWireMessage(JSON.stringify({
+      expect(() => roundTripEvent({
         ...event,
         payload: {
           ...payload,
           mutations: [{ ...mutation, display_metrics: { ...mutation.display_metrics, context_source: invalidSource } }],
         },
-      }))).toThrow("payload is invalid");
+      })).toThrow("payload is invalid");
     }
   });
 
@@ -209,25 +197,25 @@ describe("desktop agent protocol", () => {
 
   test("rejects non-object payloads", () => {
     expect(() => parseAgentWireMessage(JSON.stringify({
-      version: AGENT_PROTOCOL_VERSION,
+      jsonrpc: "2.0",
       id: "request-1",
-      command: "shutdown",
-      payload: null,
-    }))).toThrow("payload must be an object");
+      method: "shutdown",
+      params: null,
+    }))).toThrow("params must be an object");
   });
 
   test("strictly validates hot Skill permission updates", () => {
     const request = {
-      version: AGENT_PROTOCOL_VERSION,
+      jsonrpc: "2.0",
       id: "permission-1",
-      command: "update_skill_permissions",
-      payload: { allowed_skill_types: ["amazon_fba", "default"] as string[] },
+      method: "update_skill_permissions",
+      params: { allowed_skill_types: ["amazon_fba", "default"] as string[] },
     } as const;
     expect(parseAgentWireMessage(JSON.stringify(request))).toEqual(request);
     for (const allowedSkillTypes of ["*", ["default", 1], null]) {
       expect(() => parseAgentWireMessage(JSON.stringify({
         ...request,
-        payload: { allowed_skill_types: allowedSkillTypes },
+        params: { allowed_skill_types: allowedSkillTypes },
       }))).toThrow("must be a string array");
     }
   });
@@ -235,10 +223,10 @@ describe("desktop agent protocol", () => {
   test("strictly validates secret-bearing managed credential updates and public auth events", () => {
     const revision = "e".repeat(64);
     const request = {
-      version: AGENT_PROTOCOL_VERSION,
+      jsonrpc: "2.0",
       id: "managed-credential-1",
-      command: "update_managed_llm_credential",
-      payload: {
+      method: "update_managed_llm_credential",
+      params: {
         target: { provider: "kimi_coding", model: "kimi-for-coding" },
         credential: {
           provider: "kimi_coding",
@@ -253,15 +241,14 @@ describe("desktop agent protocol", () => {
     expect(parseAgentWireMessage(JSON.stringify(request))).toEqual(request);
     expect(() => parseAgentWireMessage(JSON.stringify({
       ...request,
-      payload: { credential: { ...request.payload.credential, api_key: "" } },
+      params: { credential: { ...request.params.credential, api_key: "" } },
     }))).toThrow("credential is invalid");
     expect(() => parseAgentWireMessage(JSON.stringify({
       ...request,
-      payload: { ...request.payload, target: { provider: "https://attacker.example", model: "x" } },
+      params: { ...request.params, target: { provider: "https://attacker.example", model: "x" } },
     }))).toThrow("target is invalid");
 
     const event = {
-      version: AGENT_PROTOCOL_VERSION,
       type: "managed_llm.authentication_failed",
       payload: {
         provider: "kimi_coding",
@@ -269,23 +256,24 @@ describe("desktop agent protocol", () => {
         credential_revision: revision,
       },
     } as const;
-    expect(parseAgentWireMessage(JSON.stringify(event))).toEqual(event);
-    expect(() => parseAgentWireMessage(JSON.stringify({
+    expect(roundTripEvent(event)).toEqual(event);
+    expect(() => roundTripEvent({
       ...event,
       payload: { ...event.payload, api_key: "must-not-appear" },
-    }))).toThrow("authentication event is invalid");
-    expect(() => parseAgentWireMessage(JSON.stringify({
+    })).toThrow("authentication event is invalid");
+    expect(() => roundTripEvent({
       ...event,
       payload: { ...event.payload, provider: "https://attacker.example" },
-    }))).toThrow("authentication event is invalid");
+    })).toThrow("authentication event is invalid");
   });
 
   test("accepts only directory and worktree in workspace payloads", () => {
     const request = {
-      version: AGENT_PROTOCOL_VERSION,
+      jsonrpc: "2.0",
       id: "request-workspace",
-      command: "initialize",
-      payload: {
+      method: "initialize",
+      params: {
+        protocol_version: AGENT_PROTOCOL_VERSION,
         agent_soul_path: "/runtime/resources/agent/SOUL.md",
         skills_root: "/runtime/resources/skills",
         user_skills_root: "/home/tester/.agents/skills",
@@ -300,41 +288,41 @@ describe("desktop agent protocol", () => {
     const retiredField = ["server", "scope"].join("_");
     expect(() => parseAgentWireMessage(JSON.stringify({
       ...request,
-      payload: {
-        ...request.payload,
-        legacy_workspace: { ...request.payload.legacy_workspace, [retiredField]: "local" },
+      params: {
+        ...request.params,
+        legacy_workspace: { ...request.params.legacy_workspace, [retiredField]: "local" },
       },
     }))).toThrow("unsupported fields");
     expect(() => parseAgentWireMessage(JSON.stringify({
       ...request,
-      payload: { ...request.payload, legacy_workspace: { directory: "/workspace" } },
+      params: { ...request.params, legacy_workspace: { directory: "/workspace" } },
     }))).toThrow("worktree must be a non-empty string");
   });
 
   test("rejects unknown commands and incomplete command payloads", () => {
     expect(() => parseAgentWireMessage(JSON.stringify({
-      version: AGENT_PROTOCOL_VERSION,
+      jsonrpc: "2.0",
       id: "request-1",
-      command: "run_everything",
-      payload: {},
-    }))).toThrow("unsupported agent protocol command");
+      method: "run_everything",
+      params: {},
+    }))).toThrow("Unknown method:");
     expect(() => parseAgentWireMessage(JSON.stringify({
-      version: AGENT_PROTOCOL_VERSION,
+      jsonrpc: "2.0",
       id: "request-2",
-      command: "cancel_turn",
-      payload: {},
+      method: "cancel_turn",
+      params: {},
     }))).toThrow("cancel_turn.run_id");
     expect(() => parseAgentWireMessage(JSON.stringify({
-      version: AGENT_PROTOCOL_VERSION,
+      jsonrpc: "2.0",
       id: "request-3",
-      command: "resolve_artifact",
-      payload: { session_id: "session-1" },
+      method: "resolve_artifact",
+      params: { session_id: "session-1" },
     }))).toThrow("resolve_artifact.artifact_id");
     expect(() => parseAgentWireMessage(JSON.stringify({
-      version: AGENT_PROTOCOL_VERSION,
+      jsonrpc: "2.0",
       id: "request-4",
-      command: "resolve_attachment",
-      payload: { session_id: "session-1" },
+      method: "resolve_attachment",
+      params: { session_id: "session-1" },
     }))).toThrow("resolve_attachment.attachment_id");
   });
 
@@ -419,10 +407,10 @@ describe("desktop agent protocol", () => {
       input: { provider: "kimi_coding", enabled: true },
     })).toThrow("unsupported fields");
     expect(() => parseAgentWireMessage(JSON.stringify({
-      version: AGENT_PROTOCOL_VERSION,
+      jsonrpc: "2.0",
       id: "request-dashboard",
-      command: "dashboard_call",
-      payload: { operation: "channels.health", input: {} },
+      method: "dashboard_call",
+      params: { operation: "channels.health", input: {} },
     }))).toThrow("owned by Electron Main");
     const mainOwnedInput: Record<string, unknown> = {
       "sessions.send": { text: "hello" },
@@ -435,10 +423,10 @@ describe("desktop agent protocol", () => {
       "sessions.file.reveal", "sessions.attachment.open",
     ]) {
       expect(() => parseAgentWireMessage(JSON.stringify({
-        version: AGENT_PROTOCOL_VERSION,
+        jsonrpc: "2.0",
         id: `request-${operation}`,
-        command: "dashboard_call",
-        payload: { operation, input: mainOwnedInput[operation] ?? { session_id: "session-1" } },
+        method: "dashboard_call",
+        params: { operation, input: mainOwnedInput[operation] ?? { session_id: "session-1" } },
       }))).toThrow("owned by Electron Main");
     }
     expect(() => parseDashboardRpcCall({ operation: "sessions.file.open", input: { session_id: "s" } }))

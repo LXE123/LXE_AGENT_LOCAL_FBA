@@ -1,5 +1,9 @@
+import { parseJsonRpcEnvelope, parseJsonRpcJson, JsonRpcError,
+  type JsonRpcId, type JsonRpcSuccess, type JsonRpcFailure, type JsonRpcResponse } from "./json-rpc";
+export * from "./json-rpc";
 import {
   validateAgentJob,
+  validateEmitRequest,
   validateDesktopStreamBatchRequest,
   type AgentJob,
   type DesktopStreamBatchRequest,
@@ -22,7 +26,7 @@ import type {
 
 export * from "./dashboard-rpc";
 
-export const AGENT_PROTOCOL_VERSION = 17 as const;
+export const AGENT_PROTOCOL_VERSION = 18 as const;
 
 /** Session-owned exec snapshot used only for completion events and card refresh. */
 export type ExecTaskSnapshotPayload = {
@@ -74,6 +78,7 @@ export class AgentProtocolError extends Error {
 }
 
 export type AgentInitializePayload = {
+  protocol_version: number;
   agent_soul_path: string;
   skills_root: string;
   user_skills_root: string;
@@ -191,32 +196,13 @@ export function parseAgentRunTurnResult(value: unknown): AgentRunTurnResult {
 }
 
 export type AgentRequest<C extends AgentCommand = AgentCommand> = C extends AgentCommand
-  ? {
-      version: typeof AGENT_PROTOCOL_VERSION;
-      id: string;
-      command: C;
-      payload: AgentCommandPayloads[C];
-    }
+  ? { jsonrpc: "2.0"; id: JsonRpcId; method: C; params: AgentCommandPayloads[C] }
   : never;
-
-export type AgentSuccessResponse = {
-  version: typeof AGENT_PROTOCOL_VERSION;
-  id: string;
-  ok: true;
-  result: JsonValue;
-};
-
-export type AgentErrorResponse = {
-  version: typeof AGENT_PROTOCOL_VERSION;
-  id: string;
-  ok: false;
-  error: {
-    code: string;
-    message: string;
-  };
-};
-
-export type AgentResponse = AgentSuccessResponse | AgentErrorResponse;
+export type AgentCall = AgentRequest extends infer R
+  ? R extends AgentRequest ? Omit<R, "id"> & { id?: JsonRpcId } : never : never;
+export type AgentSuccessResponse = JsonRpcSuccess;
+export type AgentErrorResponse = JsonRpcFailure;
+export type AgentResponse = JsonRpcResponse;
 
 export type AgentSessionChange = "messages" | "usage" | "artifacts" | "attachments";
 
@@ -231,21 +217,18 @@ export type BackgroundTaskChangedPayload = {
 
 export type AgentEvent =
   | {
-      version: typeof AGENT_PROTOCOL_VERSION;
       type: "item.completed";
       thread_id: string;
       turn_id: string;
       payload: EmitRequest;
     }
   | {
-      version: typeof AGENT_PROTOCOL_VERSION;
       type: "conversation.stream.delta";
       thread_id: string;
       turn_id: string;
       payload: DesktopStreamBatchRequest;
     }
   | {
-      version: typeof AGENT_PROTOCOL_VERSION;
       type: "typing.changed";
       thread_id: string;
       turn_id: string;
@@ -258,19 +241,16 @@ export type AgentEvent =
       };
     }
   | {
-      version: typeof AGENT_PROTOCOL_VERSION;
       type: "agent.wake";
       payload: JsonObject;
     }
   | {
-      version: typeof AGENT_PROTOCOL_VERSION;
       type: "background_task.changed";
       thread_id: string;
       turn_id: string;
       payload: BackgroundTaskChangedPayload;
     }
   | {
-      version: typeof AGENT_PROTOCOL_VERSION;
       type: "managed_llm.authentication_failed";
       payload: {
         provider: string;
@@ -279,31 +259,30 @@ export type AgentEvent =
       };
     }
   | {
-      version: typeof AGENT_PROTOCOL_VERSION;
       type: "session.changed";
       thread_id: string;
       payload: AgentSessionChangedPayload;
     }
   | {
-      version: typeof AGENT_PROTOCOL_VERSION;
       type: "system.ready" | "system.status";
       payload: JsonObject;
     }
   | {
-      version: typeof AGENT_PROTOCOL_VERSION;
       type: "thread.started";
       thread_id: string;
       payload: JsonObject;
     }
   | {
-      version: typeof AGENT_PROTOCOL_VERSION;
       type: "turn.started" | "turn.completed" | "turn.failed";
       thread_id: string;
       turn_id: string;
       payload: JsonObject;
     };
 
-export type AgentWireMessage = AgentRequest | AgentResponse | AgentEvent;
+export type AgentNotification = AgentEvent extends infer E
+  ? E extends AgentEvent ? { jsonrpc: "2.0"; method: E["type"]; params: Omit<E, "type"> } : never : never;
+export type AgentWireMessage = AgentCall | AgentResponse | AgentNotification;
+export type AgentServerOutput = AgentResponse | AgentNotification | AgentResponse[];
 
 export type DesktopComponentState = "stopped" | "starting" | "ready" | "error";
 
@@ -698,6 +677,9 @@ const validateRequestPayload = (command: AgentCommand, payload: Record<string, u
   };
   switch (command) {
     case "initialize":
+      if (!Number.isSafeInteger(payload.protocol_version)) {
+        throw new Error("agent protocol initialize.protocol_version must be an integer");
+      }
       requireText("agent_soul_path");
       requireText("skills_root");
       requireText("user_skills_root");
@@ -789,39 +771,69 @@ const validateRequestPayload = (command: AgentCommand, payload: Record<string, u
   }
 };
 
-export function parseAgentWireMessage(line: string): AgentWireMessage {
-  let value: unknown;
+function desktopStreamValidationError(payload: Record<string, unknown>): string {
+  const branches: Record<string, number> = { part_updated: 0, part_delta: 1, stream_updated: 2 };
+  const errors = validateDesktopStreamBatchRequest.errors ?? [];
+  const relevant = errors.filter((error) => {
+    const match = /^\/mutations\/(\d+)/u.exec(error.instancePath);
+    const branch = /\/oneOf\/(\d+)\//u.exec(error.schemaPath);
+    if (!match || !branch) return error.keyword !== "oneOf";
+    const mutation = (payload.mutations as Array<{ kind?: string }> | undefined)?.[Number(match[1])];
+    const selected = branches[mutation?.kind ?? ""];
+    return selected === undefined || selected === Number(branch[1]);
+  });
+  return (relevant.length ? relevant : errors).map((error) =>
+    `${error.instancePath || "/"}${error.params.additionalProperty ? `/${error.params.additionalProperty}` : ""}: ${error.message}`
+  ).join("; ") || "invalid request";
+}
+
+export function parseAgentCall(value: unknown): AgentCall {
+  const message = parseJsonRpcEnvelope(value);
+  if (!("method" in message)) throw new JsonRpcError(-32600, "agent-cli accepts calls only");
+  if (!isAgentCommand(message.method)) throw new JsonRpcError(-32601, `Unknown method: ${message.method}`);
+  const params = "params" in message ? message.params : {};
   try {
-    value = JSON.parse(line);
-  } catch {
-    throw new Error("agent protocol line is not valid JSON");
+    const object = objectValue(params);
+    if (!object) throw new Error(`agent protocol ${message.method}.params must be an object`);
+    validateRequestPayload(message.method, object);
+    return { ...message, params: message.method === "dashboard_call" ? parseAgentDashboardRpcCall(object) : object } as AgentCall;
+  } catch (cause) {
+    throw new JsonRpcError(-32602, cause instanceof Error ? cause.message : String(cause));
   }
-  const object = objectValue(value);
-  if (!object) throw new Error("agent protocol message must be an object");
-  if (object.version !== AGENT_PROTOCOL_VERSION) {
-    throw new Error(`unsupported agent protocol version: ${String(object.version ?? "")}`);
+}
+
+export function encodeAgentEvent(event: AgentEvent): AgentNotification {
+  const { type, ...params } = event;
+  return { jsonrpc: "2.0", method: type, params } as AgentNotification;
+}
+
+export function decodeAgentEvent(notification: AgentNotification): AgentEvent {
+  const object = { ...notification.params, type: notification.method } as Record<string, unknown>;
+  if (!agentEventTypes.has(object.type as AgentEvent["type"]) || !objectValue(object.payload)) {
+    throw new JsonRpcError(-32602, "Unknown or malformed agent notification");
   }
-  if (typeof object.id === "string" && typeof object.command === "string") {
-    if (!object.id.trim()) throw new Error("agent protocol request id must be non-empty");
-    if (!isAgentCommand(object.command)) throw new Error(`unsupported agent protocol command: ${object.command}`);
-    const payload = objectValue(object.payload);
-    if (!payload) throw new Error("agent protocol request payload must be an object");
-    validateRequestPayload(object.command, payload);
-    if (object.command === "dashboard_call") {
-      object.payload = parseAgentDashboardRpcCall(payload);
+  const scoped = ["item.completed", "conversation.stream.delta", "typing.changed", "background_task.changed", "thread.started", "turn.started", "turn.completed", "turn.failed", "session.changed"];
+  if (scoped.includes(String(object.type))) {
+    for (const field of object.type === "thread.started" || object.type === "session.changed" ? ["thread_id"] : ["thread_id", "turn_id"]) {
+      if (typeof object[field] !== "string" || !String(object[field]).trim()) {
+        throw new JsonRpcError(-32602, `agent protocol ${object.type}.${field} must be a non-empty string`);
+      }
     }
-    return object as AgentRequest;
   }
-  if (typeof object.id === "string" && typeof object.ok === "boolean") {
-    if (!object.id.trim()) throw new Error("agent protocol response id must be non-empty");
-    if (!object.ok && !objectValue(object.error)) throw new Error("agent protocol error response is malformed");
-    if (object.ok && !("result" in object)) throw new Error("agent protocol success response is malformed");
-    return object as AgentResponse;
-  }
-  if (typeof object.type === "string" && objectValue(object.payload)) {
-    if (!agentEventTypes.has(object.type as AgentEvent["type"])) {
-      throw new Error(`unsupported agent protocol event: ${object.type}`);
+  if (object.type === "item.completed" || object.type === "typing.changed") {
+    const payload = objectValue(object.payload)!;
+    if (object.type === "item.completed" && !validateEmitRequest(payload)) {
+      throw new JsonRpcError(-32602, "agent protocol item.completed payload is invalid: " +
+        (validateEmitRequest.errors ?? []).map((error) => `${error.instancePath}: ${error.message}`).join("; "));
     }
+    if (object.type === "typing.changed" && (
+      !["start", "stop"].includes(String(payload.operation)) ||
+      ["response_route_id", "emit_id"].some((field) => typeof payload[field] !== "string" || !String(payload[field]).trim())
+    )) throw new JsonRpcError(-32602, "agent protocol typing.changed payload is invalid");
+    if (payload.session_id !== object.thread_id || payload.turn_id !== object.turn_id) {
+      throw new JsonRpcError(-32602, `agent protocol ${object.type} envelope does not match payload`);
+    }
+  }
     if (object.type === "session.changed") {
       if (typeof object.thread_id !== "string" || !object.thread_id.trim()) {
         throw new Error("agent protocol session.changed.thread_id must be a non-empty string");
@@ -895,22 +907,35 @@ export function parseAgentWireMessage(line: string): AgentWireMessage {
       const payload = objectValue(object.payload)!;
       if (!validateDesktopStreamBatchRequest(payload)) {
         throw new Error(
-          `agent protocol conversation.stream.delta payload is invalid: ${validateDesktopStreamBatchRequest.errors?.[0]?.message ?? "invalid request"}`,
+          `agent protocol conversation.stream.delta payload is invalid: ${desktopStreamValidationError(payload)}`,
         );
       }
       if (payload.session_id !== object.thread_id || payload.turn_id !== object.turn_id) {
         throw new Error("agent protocol conversation.stream.delta envelope does not match payload");
       }
     }
-    return object as AgentEvent;
+  return object as AgentEvent;
+}
+
+export function parseAgentWireValue(value: unknown): AgentWireMessage {
+  const message = parseJsonRpcEnvelope(value);
+  if (!("method" in message)) return message;
+  if (!("id" in message) && agentEventTypes.has(message.method as AgentEvent["type"])) {
+    const notification = message as AgentNotification;
+    decodeAgentEvent(notification);
+    return notification;
   }
-  throw new Error("unrecognized agent protocol message");
+  return parseAgentCall(message);
+}
+
+export function parseAgentWireMessage(line: string): AgentWireMessage {
+  return parseAgentWireValue(parseJsonRpcJson(line));
 }
 
 export function isAgentResponse(message: AgentWireMessage): message is AgentResponse {
-  return "id" in message && "ok" in message;
+  return "result" in message || "error" in message;
 }
 
-export function isAgentEvent(message: AgentWireMessage): message is AgentEvent {
-  return "type" in message;
+export function isAgentEvent(message: AgentWireMessage): message is AgentNotification {
+  return "method" in message && !("id" in message) && agentEventTypes.has(message.method as AgentEvent["type"]);
 }

@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { AgentJob } from "@lxe/protocol";
-import { AGENT_PROTOCOL_VERSION, AgentProtocolError, type AgentEvent } from "@lxe/desktop-protocol";
+import { AgentProtocolError, type AgentEvent } from "@lxe/desktop-protocol";
 import { ProcessAgentRuntime } from "../../src/orchestration/process-runtime";
 import { RunHandle } from "../../src/orchestration/scheduler";
 import { testWorkspace, workspaceFor } from "../workspace";
@@ -117,7 +117,7 @@ describe("ProcessAgentRuntime", () => {
     const change = events.find((event): event is Extract<AgentEvent, { type: "session.changed" }> =>
       event.type === "session.changed");
     expect(change).toEqual({
-      version: AGENT_PROTOCOL_VERSION,
+
       type: "session.changed",
       thread_id: "session-1",
       payload: { changes: ["messages"] },
