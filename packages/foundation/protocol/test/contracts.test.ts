@@ -70,6 +70,12 @@ describe("protocol contracts", () => {
       seq: 1,
     };
     expect(validateEmitRequest(stream)).toBe(true);
+    for (const context_source of ["estimated", "usage_calibrated", "unknown", null]) {
+      expect(validateEmitRequest({
+        ...stream,
+        display_metrics: { ...stream.display_metrics, context_source },
+      })).toBe(context_source === "estimated" || context_source === "usage_calibrated");
+    }
     expect(validateEmitRequest({ ...stream, stream_type: "content_block_delta" })).toBe(false);
     expect(validateEmitRequest({ ...stream, state: "running" })).toBe(false);
     expect(validateEmitRequest({ ...stream, seq: 0 })).toBe(false);

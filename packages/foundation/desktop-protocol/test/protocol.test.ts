@@ -110,7 +110,7 @@ describe("desktop agent protocol", () => {
     }))).toThrow("payload is invalid");
   });
 
-  test("strictly parses desktop stream batches and matching envelopes", () => {
+  test.each([undefined, "estimated", "usage_calibrated"] as const)("strictly parses desktop stream batches with context source %s and matching envelopes", (context_source) => {
     const payload: DesktopStreamBatchRequest = {
       session_id: "session-1",
       turn_id: "turn-1",
@@ -131,6 +131,7 @@ describe("desktop agent protocol", () => {
           cache_creation_input_tokens: 0,
           context_tokens: 0,
           context_window_tokens: 100,
+          ...(context_source === undefined ? {} : { context_source }),
         },
       }],
     };
@@ -146,6 +147,17 @@ describe("desktop agent protocol", () => {
       .toThrow("envelope does not match");
     expect(() => parseAgentWireMessage(JSON.stringify({ ...event, payload: { ...payload, seq: 0 } })))
       .toThrow("payload is invalid");
+    const mutation = payload.mutations[0]!;
+    if (mutation.kind !== "stream_updated") throw new Error("Expected stream_updated fixture");
+    for (const invalidSource of ["unknown", null]) {
+      expect(() => parseAgentWireMessage(JSON.stringify({
+        ...event,
+        payload: {
+          ...payload,
+          mutations: [{ ...mutation, display_metrics: { ...mutation.display_metrics, context_source: invalidSource } }],
+        },
+      }))).toThrow("payload is invalid");
+    }
   });
 
   test("strictly parses run_turn results", () => {

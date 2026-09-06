@@ -134,6 +134,7 @@
         "cache_read_input_tokens": { "type": "integer", "minimum": 0 },
         "cache_creation_input_tokens": { "type": "integer", "minimum": 0 },
         "context_tokens": { "type": "integer", "minimum": 0 },
+        "context_source": { "enum": ["estimated", "usage_calibrated"] },
         "context_window_tokens": { "type": "integer", "minimum": 0 }
       }
     }
