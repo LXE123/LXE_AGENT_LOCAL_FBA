@@ -33,6 +33,7 @@ env/
 # AI/Agent tools
 .claude/
 .codex/
+.zcode/
 .superpowers/
 /.workbuddy/
 .worktrees/
