@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { ChevronDown } from "lucide-react";
+import { processId } from "./process";
 import type { ConversationRow } from "./presentation";
 import { useUiText } from "../../shared/i18n";
 
@@ -25,6 +26,53 @@ export function ConversationWindow({ rows, renderRow, hasOlder, hasNewer, loadOl
   useEffect(() => {
     const ids = new Set(rows.map((row) => row.id));
     for (const key of virtual.itemSizeCache.keys()) if (!ids.has(String(key))) virtual.itemSizeCache.delete(key);
+  }, [rows, virtual]);
+  const manualAnchor = useRef<{id: string; offset: number; bottom: boolean} | undefined>(undefined);
+  const previousRows = useRef(rows);
+  const previousIds = new Set(previousRows.current.map(row => row.id));
+  const currentIds = new Set(rows.map(row => row.id));
+  const folding = previousRows.current.some(row => row.presentation === "process" && !currentIds.has(row.id) && currentIds.has(processId(row)));
+  const unfolding = rows.some(row => row.presentation === "process" && !previousIds.has(row.id) && previousIds.has(processId(row)));
+  let anchor: {id: string; offset: number; bottom: boolean} | undefined;
+  if ((folding || unfolding) && root.current) {
+    const el = root.current;
+    const top = el.getBoundingClientRect().top;
+    const elements = [...el.querySelectorAll<HTMLElement>("[data-conversation-row]")];
+    const first = elements.find(item => item.getBoundingClientRect().bottom > top);
+    if (first) {
+      let id = first.dataset.conversationRow!;
+      let offset = first.getBoundingClientRect().top - top;
+      if (!currentIds.has(id)) {
+        const old = previousRows.current.find(row => row.id === id);
+        if (old) {
+          id = processId(old);
+          const header = elements.find(item => item.dataset.conversationRow === id);
+          offset = header ? Math.max(0, header.getBoundingClientRect().top - top) : 0;
+        }
+      }
+      anchor = {id, offset, bottom: el.scrollHeight - el.scrollTop - el.clientHeight <= 80 && !hasNewer};
+    }
+  }
+  if (manualAnchor.current && (folding || unfolding)) anchor = manualAnchor.current;
+  useLayoutEffect(() => {
+    previousRows.current = rows;
+    manualAnchor.current = undefined;
+    if (!anchor) return;
+    const saved = anchor;
+    let frame = 0;
+    let passes = 0;
+    const restore = () => {
+      if (saved.bottom) virtual.scrollToEnd();
+      else {
+        const index = rows.findIndex(row => row.id === saved.id);
+        const item = root.current?.querySelector<HTMLElement>(`[data-index="${index}"]`);
+        if (item && root.current) virtual.scrollBy(item.getBoundingClientRect().top - root.current.getBoundingClientRect().top - saved.offset);
+        else if (index >= 0) virtual.scrollToIndex(index, {align: "start"});
+      }
+      if (++passes < 3) frame = requestAnimationFrame(restore);
+    };
+    restore();
+    return () => cancelAnimationFrame(frame);
   }, [rows, virtual]);
   const items = virtual.getVirtualItems();
   const visibleIds = items.filter((item) => item.end >= (virtual.scrollOffset ?? 0)
@@ -53,7 +101,12 @@ export function ConversationWindow({ rows, renderRow, hasOlder, hasNewer, loadOl
     else if (el.scrollHeight - el.scrollTop - el.clientHeight <= 120 && hasNewer) void load("newer");
   }, [items[0]?.index, items.at(-1)?.index, following, hasOlder, hasNewer, loading, load, pageError, rows.length]);
   return <div className="conversation-scroll-area">
-    <div className="conversation-transcript" ref={root} style={{ overflowAnchor: "none" }} onScroll={() => {
+    <div className="conversation-transcript" ref={root} style={{ overflowAnchor: "none" }} onClickCapture={(event) => {
+      const target = event.target as HTMLElement;
+      const button = target.closest(".conversation-process-toggle");
+      const row = button?.closest<HTMLElement>("[data-conversation-row]");
+      if (row && root.current) manualAnchor.current = {id: row.dataset.conversationRow!, offset: row.getBoundingClientRect().top - root.current.getBoundingClientRect().top, bottom: false};
+    }} onScroll={() => {
       const el = root.current;
       if (initial.current && el) setFollowing(el.scrollHeight - el.scrollTop - el.clientHeight <= 80 && !hasNewer);
     }}>

@@ -1,7 +1,7 @@
 import type { DesktopConversationActivityPayload, DesktopConversationSendPayload } from "@lxe/desktop-protocol";
 import type { DesktopConversationTurnPayload, SessionMessage, SessionArtifactPayload } from "../../api/payloads";
 import { isRecord } from "../../shared/content";
-import { fallbackToolCallBlocks, toolOperations, type ToolOperation } from "./conversation";
+import { finalResponseIndex, fallbackToolCallBlocks, toolOperations, type ToolOperation } from "./conversation";
 
 export interface PendingMessage {
   pendingId: string; sessionId: string; text: string; createdAt: number;
@@ -9,7 +9,8 @@ export interface PendingMessage {
   turnId?: string; messageId?: string; error?: string;
 }
 export interface ConversationRow {
-  id: string; groupId: string; turnId: string; kind: "message" | "tool" | "status" | "artifacts";
+  id: string; groupId: string; turnId: string; kind: "message" | "tool" | "status" | "artifacts" | "process";
+  presentation?: "process" | "final";
   message?: SessionMessage; operation?: ToolOperation;
   liveTool?: NonNullable<DesktopConversationTurnPayload["stream"]>["tool_steps"][number];
   phase?: string; startedAt?: number; elapsedMs?: number;
@@ -27,6 +28,16 @@ export function conversationRows(messages: SessionMessage[], turns: DesktopConve
     const content = Array.isArray(message.content) ? message.content : message.content ? [{type:"text",text:String(message.content)}] : [];
     return {...message, tool_calls: undefined, content: [...content, ...fallbackToolCallBlocks(message.tool_calls)]};
   });
+  const finalMessages = new Set<SessionMessage>();
+  const groups = new Map<string, SessionMessage[]>();
+  for (const message of messages) {
+    const key = message.turn?.turn_id || message.display_group_id;
+    const group = groups.get(key) ?? []; group.push(message); groups.set(key, group);
+  }
+  for (const group of groups.values()) {
+    const index = finalResponseIndex(group, group.find(message => message.turn?.status)?.turn?.status);
+    if (index >= 0) finalMessages.add(group[index]!);
+  }
   const rows: ConversationRow[] = [];
   const byTurn = new Map<string, ConversationRow[]>();
   const add = (row: ConversationRow) => {
@@ -55,10 +66,10 @@ export function conversationRows(messages: SessionMessage[], turns: DesktopConve
             const result = isRecord(op.result) ? op.result : {};
             return op.call === block || op.result === block || String(call.id || result.tool_call_id || result.tool_use_id) === callId;
           });
-          if (operation) { claimedTools.add(id); add({ ...base, id, kind: "tool", operation: { ...operation, key: id } }); }
+          if (operation) { claimedTools.add(id); add({ ...base, id, kind: "tool", presentation: "process", operation: { ...operation, key: id } }); }
           return;
         }
-        add({ ...base, id: `${messageId}:${index}`, kind: "message", status: "completed", message: { ...message, content: [block], attachments: index === blocks.length - 1 ? message.attachments : undefined, artifacts: undefined } });
+        add({ ...base, id: `${messageId}:${index}`, kind: "message", presentation: message.role === "assistant" ? (finalMessages.has(message) && block.type === "text" ? "final" : "process") : undefined, status: "completed", message: { ...message, content: [block], attachments: index === blocks.length - 1 ? message.attachments : undefined, artifacts: undefined } });
       });
     }
     if (message.artifacts?.length) add({ ...base, id: `artifacts:${messageId}`, kind: "artifacts", artifacts: message.artifacts });
@@ -76,12 +87,12 @@ export function conversationRows(messages: SessionMessage[], turns: DesktopConve
       rows.push({ ...base, id: userId, kind: "message", status: turn.state, message: { display_group_id: groupId, role: "user", content: turn.text, attachments: turn.attachments, created_at: base.createdAt / 1000 } });
     }
     const parts: ConversationRow[] = (turn.stream?.process_parts ?? []).map((part) => part.type === "tool"
-      ? { ...base, id: `tool:${part.tool_step.id}`, kind: "tool", liveTool: part.tool_step }
-      : { ...base, id: part.part_id, kind: "message", status: part.status, message: { display_group_id: groupId, role: "assistant", content: [part.type === "thinking" ? { type: "thinking", thinking: part.text, redacted: part.redacted_count > 0 } : { type: "text", text: part.text }] } });
+      ? { ...base, id: `tool:${part.tool_step.id}`, kind: "tool", presentation: "process", liveTool: part.tool_step }
+      : { ...base, id: part.part_id, kind: "message", presentation: part.type === "text" && part.presentation === "final" ? "final" : "process", status: part.status, message: { display_group_id: groupId, role: "assistant", content: [part.type === "thinking" ? { type: "thinking", thinking: part.text, redacted: part.redacted_count > 0 } : { type: "text", text: part.text }] } });
     // Stored data confirms an item; the live order remains authoritative during the handoff,
     // including failed-attempt rows that deliberately have no persisted counterpart.
     const existing = new Map(rows.map((row) => [row.id, row]));
-    const merged = parts.map((part) => existing.get(part.id) ?? part);
+    const merged = parts.map((part) => existing.has(part.id) ? { ...existing.get(part.id)!, presentation: part.presentation } : part);
     const partIds = new Set(parts.map((part) => part.id));
     const insertion = rows.findIndex((row) => row.turnId === turn.turn_id && row.message?.role !== "user");
     for (let i = rows.length - 1; i >= 0; i--) if (partIds.has(rows[i]!.id)) rows.splice(i, 1);

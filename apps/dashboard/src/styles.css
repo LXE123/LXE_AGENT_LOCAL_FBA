@@ -11303,3 +11303,17 @@ pre {
   color: var(--muted);
   font-size: 0.75rem;
 }
+
+.conversation-process-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 0;
+  border: 0;
+  border-bottom: 1px solid var(--border-color, #e6e1d8);
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}

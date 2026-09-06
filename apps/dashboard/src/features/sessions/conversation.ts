@@ -477,19 +477,23 @@ function toolTimelineItem(
   };
 }
 
+export function finalResponseIndex(messages: SessionMessage[], status?: string | null): number {
+  const terminalIsReply = status !== "error" && status !== "cancelled";
+  return terminalIsReply
+    ? messages.reduce((candidate, message, index) =>
+      roleLabel(message.role) === "assistant" && hasReaderFacingText(message) && !containsToolCall(message)
+        ? index
+        : candidate, -1)
+    : -1;
+}
+
 function buildResponseGroup(
   messages: SessionMessage[],
   displayGroupId: string,
   startIndex: number,
 ): ConversationResponseGroup {
   const turn = messages.find((message) => message.turn)?.turn;
-  const terminalIsReply = turn?.status !== "error" && turn?.status !== "cancelled";
-  const finalIndex = terminalIsReply
-    ? messages.reduce((candidate, message, index) =>
-      roleLabel(message.role) === "assistant" && hasReaderFacingText(message) && !containsToolCall(message)
-        ? index
-        : candidate, -1)
-    : -1;
+  const finalIndex = finalResponseIndex(messages, turn?.status);
   const results = resultCandidates(messages);
   const timeline: ConversationTimelineItem[] = [];
   const takeResult = (call: unknown): ToolResultCandidate | undefined => {

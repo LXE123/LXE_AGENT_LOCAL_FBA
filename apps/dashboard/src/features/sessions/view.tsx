@@ -77,6 +77,7 @@ import {
 } from "../models/model";
 import { groupSidebarSessions } from "./model";
 import { ConversationWindow } from "./virtual-window";
+import { useProcessRows } from "./process";
 import { conversationRows, type ConversationRow, type PendingMessage } from "./presentation";
 import { ConversationWelcome } from "./welcome";
 
@@ -1399,8 +1400,8 @@ function ConversationStatus({ row }: { row: ConversationRow }) {
     : row.status === "stopping" ? t.conversation.stopping : phaseLabel();
   return <div aria-live={row.status === "error" ? "assertive" : "polite"} className={`live-progress-status state-${row.status}`}>
     {active ? <LoaderCircle className="conversation-spinner" size={13} /> : null}
-    <span className="live-progress-label">{label}</span>
-    {elapsedMs >= 1_000 ? <span className="live-progress-elapsed">{formatDurationMs(elapsedMs)}</span> : null}
+    <span className="live-progress-label">{row.kind === "process" && row.status === "completed" ? t.conversation.processCompleted(elapsedMs >= 1_000 ? formatDurationMs(elapsedMs) : "") : label}</span>
+    {elapsedMs >= 1_000 && !(row.kind === "process" && row.status === "completed") ? <span className="live-progress-elapsed">{formatDurationMs(elapsedMs)}</span> : null}
   </div>;
 }
 
@@ -1412,6 +1413,10 @@ export const UnifiedConversationRow = React.memo(function UnifiedConversationRow
   const stateLabel = row.status === "error" ? t.conversation.error : row.status === "cancelled" ? t.conversation.cancelled
     : row.status === "completed" ? t.conversation.completed : row.status === "queued" ? t.conversation.queued : t.conversation.running;
   if (row.kind === "status") return <ConversationStatus row={row} />;
+  if (row.kind === "process") return <button type="button" className="conversation-process-toggle"
+    aria-expanded={expanded} onClick={() => onToggle(row.id)}>
+    <ConversationStatus row={row} /><ChevronRight size={14} style={{transform: expanded ? "rotate(90deg)" : undefined}} />
+  </button>;
   if (row.kind === "artifacts") return <TurnFileList files={row.artifacts ?? []} onOpenFile={onOpenFile} onRevealFile={onRevealFile} />;
   if (row.kind === "tool") {
     const operation = row.operation ?? (row.liveTool ? liveToolOperations([row.liveTool])[0] : undefined);
@@ -1428,10 +1433,15 @@ export const UnifiedConversationRow = React.memo(function UnifiedConversationRow
   const message = row.message!;
   const blocks = Array.isArray(message.content) ? message.content : [];
   const thinking = blocks.length === 1 && isRecord(blocks[0]) && ["thinking", "redacted_thinking"].includes(String(blocks[0].type)) ? blocks[0] : undefined;
-  if (thinking) return <div className="message-block thinking-block">
-    <button className="block-title thinking-block-toggle" type="button" aria-expanded={expanded} onClick={() => onToggle(row.id)}><Brain size={14} />{t.message.thinking}</button>
-    {expanded ? <div className="thinking-block-body"><div className="message-text">{String(thinking.thinking ?? "")}</div>{thinking.redacted || thinking.type === "redacted_thinking" ? <RedactedThinkingBlock /> : null}</div> : null}
+  if (thinking) return <div className="process-message-content">
+    {row.status === "error" ? <div className="process-thinking-text">{stateLabel}</div> : null}
+    <div className="process-thinking-text">{String(thinking.thinking ?? "")}</div>
+    {thinking.redacted || thinking.type === "redacted_thinking" ? <div className="process-thinking-text redacted">{t.message.redactedThinking}</div> : null}
+  </div>;
+  if (row.presentation === "process" && message.role === "assistant") return <div className="timeline-text process-message-content">
+    <MessageContent content={message.content} message={message} />
     {row.status === "error" ? <div role="status">{stateLabel}</div> : null}
+    {message.attachments?.length ? <InputAttachmentList attachments={message.attachments} onOpen={onOpenAttachment} /> : null}
   </div>;
   if (message.role !== "user" && message.role !== "assistant") return <article className="message-card role-system"><RoleBadge role={message.role} /><MessageContent content={message.content} message={message} /></article>;
   const role = message.role;
@@ -1541,6 +1551,7 @@ export function SessionDetailView({
     persistedTurns.has(turn.turn_id) || turn.turn_id === activity?.active?.turn_id || turn.turn_id === activity?.latest?.turn_id || activity?.queued.some((entry) => entry.turn_id === turn.turn_id)
     || pendingMessages.some((item) => item.turnId === turn.turn_id));
   const rows = conversationRows(messages, turns, hasNewer ? [] : pendingMessages);
+  const process = useProcessRows(rows, sessionKey);
   const [expandedRows, setExpandedRows] = useState<Map<string, boolean>>(() => new Map());
   useEffect(() => { setExpandedRows(new Map()); setSessionInfoOpen(false); }, [sessionKey]);
   const toggleRow = useCallback((id: string) => setExpandedRows((current) => new Map(current).set(id, !current.get(id))), []);
@@ -1623,10 +1634,10 @@ export function SessionDetailView({
       {loading ? <EmptyState label={t.sessionDetail.loading} /> : null}
       {error ? <EmptyState label={t.common.errorPrefix(t.sessionDetail.errorLabel, error)} /> : null}
       {!loading && !error ? (
-        <ConversationWindow key={sessionKey} rows={rows} hasOlder={hasOlder} hasNewer={hasNewer}
+        <ConversationWindow key={sessionKey} rows={process.rows} hasOlder={hasOlder} hasNewer={hasNewer}
           loadOlder={onLoadOlder} loadNewer={onLoadNewer} jumpToLatest={onJumpToLatest} onVisibleGroups={onVisibleGroups}
           pageError={loadOlderError} empty={newConversation ? <ConversationWelcome /> : <EmptyState label={t.sessionDetail.empty} />}
-          renderRow={(row) => <UnifiedConversationRow row={row} expanded={expandedRows.get(row.id) ?? false} onToggle={toggleRow}
+          renderRow={(row) => <UnifiedConversationRow row={row} expanded={row.kind === "process" ? process.states.get(row.id)?.expanded ?? false : expandedRows.get(row.id) ?? false} onToggle={row.kind === "process" ? process.toggle : toggleRow}
             onOpenFile={onOpenFile} onRevealFile={onRevealFile} onOpenAttachment={onOpenAttachment} />} />
       ) : null}
       <div className="conversation-composer-dock">
