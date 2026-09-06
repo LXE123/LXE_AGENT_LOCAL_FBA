@@ -22,6 +22,9 @@ export function ConversationWindow({ rows, renderRow, hasOlder, hasNewer, loadOl
   const virtual = useVirtualizer({ count: rows.length, getScrollElement: () => root.current,
     getItemKey, estimateSize: () => 100, overscan: 5, anchorTo: "end", followOnAppend: hasNewer ? false : "auto",
     scrollEndThreshold: 80, useAnimationFrameWithResizeObserver: true,
+    // Include edge spacing in virtual measurements and scroll-to-end targets.
+    // The bottom fade covers 26px; keep the last row above it.
+    paddingStart: 24, paddingEnd: 40,
   });
   useEffect(() => {
     const ids = new Set(rows.map((row) => row.id));
@@ -110,7 +113,7 @@ export function ConversationWindow({ rows, renderRow, hasOlder, hasNewer, loadOl
       const el = root.current;
       if (initial.current && el) setFollowing(el.scrollHeight - el.scrollTop - el.clientHeight <= 80 && !hasNewer);
     }}>
-      <div className="conversation-feed" style={{ position: "relative", height: rows.length ? virtual.getTotalSize() : undefined, minHeight: rows.length ? undefined : "100%" }}>
+      <div className="conversation-feed" style={{ position: "relative", paddingBlock: rows.length ? 0 : undefined, height: rows.length ? virtual.getTotalSize() : undefined, minHeight: rows.length ? undefined : "100%" }}>
         {!rows.length ? empty : items.map((item) => <div key={item.key} ref={virtual.measureElement} data-index={item.index}
           data-conversation-row={rows[item.index]!.id} data-display-group={rows[item.index]!.groupId}
           style={{ position: "absolute", top: 0, left: 0, width: "100%", transform: `translateY(${item.start}px)`, paddingBottom: rows[item.index]!.kind === "process" ? 8 : rows[item.index]!.presentation === "process" ? 6 : 12 }}>
